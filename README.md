@@ -9,6 +9,8 @@ Features:
 - Drag frames into the exact animation order before processing.
 - Remove or move individual frames before generation.
 - Pixel-similarity registration with horizontal, vertical, or free X/Y translation.
+- Optional aspect-ratio-preserving auto-shrink for frames larger than the preceding frame.
+- Fix-to-frame-1 mode that independently optimises uniform scale and X/Y pan for every frame against the first frame.
 - No resizing or source-pixel cropping during registration; the canvas expands as needed.
 - Optional Practical-RIFE 4.25 interpolation at 2x, 4x, or 8x.
 - Live upload, WebP extraction, alignment, interpolation, and encoding progress.
@@ -49,6 +51,30 @@ http://<server-LAN-IP>:18743
 ```
 
 Your operating-system firewall must allow inbound TCP connections on port `18743`.
+
+## Auto-shrink oversized frames
+
+Choose **Shrink oversized frames to fit previous, then align** when source frames have inconsistent raster dimensions.
+
+For every frame after the first, the tool checks the preceding processed frame. If the current frame is wider or taller, it applies the largest uniform scale that makes the entire current frame fit inside the previous frame:
+
+```text
+scale = min(previous width / current width,
+            previous height / current height,
+            1.0)
+```
+
+The frame is never enlarged, its aspect ratio is always preserved, and Lanczos resampling is used for the reduction. Registration then runs on the fitted frames.
+
+## Fix existing WebP to frame 1
+
+Choose **Fix to frame 1: optimise scale + pan against first frame** to stabilise an existing animation whose frames have inconsistent zoom or position.
+
+The first frame is never changed. Every later frame is independently compared with frame 1, and the tool searches for the uniform scale plus allowed X/Y translation that produces the highest pixel-similarity score. Because the same anchor is used every time, corrections do not accumulate from one frame to the next.
+
+Scaling is always uniform, so aspect ratio cannot be distorted. The optimiser can shrink or enlarge a frame when that improves the match. Translation still respects the **Allowed movement** setting, so it can be constrained to horizontal only, vertical only, both axes, or disabled.
+
+When an animated WebP is uploaded as the first source, the browser automatically selects this mode. You can switch back to sequential alignment if desired.
 
 ## Existing animated WebP input
 
@@ -94,7 +120,7 @@ When RIFE is enabled, the pipeline is:
 ```text
 uploaded raster frames / extracted WebP frames
   -> user-defined drag order
-  -> pixel registration
+  -> selected geometry correction (sequential / fit-previous / fix-to-frame-1)
   -> common expanded canvas
   -> RIFE interpolation
   -> animated WebP encoding
