@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Animation Frame Aligner</title>
+  <title>WebP Animator</title>
   <style>
     :root {
       color-scheme: light dark;
@@ -23,7 +23,7 @@
     }
 
     main {
-      width: min(760px, 100%);
+      width: min(1040px, 100%);
       border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
       border-radius: 18px;
       padding: 24px;
@@ -44,7 +44,7 @@
     .drop {
       display: grid;
       place-items: center;
-      min-height: 180px;
+      min-height: 150px;
       border: 2px dashed color-mix(in srgb, CanvasText 25%, transparent);
       border-radius: 14px;
       padding: 22px;
@@ -58,14 +58,8 @@
       background: color-mix(in srgb, Highlight 10%, transparent);
     }
 
-    .drop input {
-      display: none;
-    }
-
-    .drop strong {
-      display: block;
-      margin-bottom: 6px;
-    }
+    .drop input { display: none; }
+    .drop strong { display: block; margin-bottom: 6px; }
 
     #fileSummary {
       margin-top: 12px;
@@ -73,11 +67,99 @@
       opacity: .75;
     }
 
+    .frames-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin: 20px 0 10px;
+    }
+
+    .frames-header strong { font-size: .95rem; }
+
+    .small-button {
+      width: auto;
+      margin: 0;
+      padding: 7px 10px;
+      border: 1px solid color-mix(in srgb, CanvasText 20%, transparent);
+      background: Canvas;
+      color: CanvasText;
+      border-radius: 9px;
+      font-weight: 600;
+    }
+
+    #frameStrip {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+      gap: 10px;
+      min-height: 0;
+    }
+
+    .frame-card {
+      position: relative;
+      border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+      border-radius: 12px;
+      overflow: hidden;
+      background: color-mix(in srgb, CanvasText 3%, Canvas);
+      cursor: grab;
+      user-select: none;
+    }
+
+    .frame-card.drag-source { opacity: .35; }
+    .frame-card.drag-over { outline: 2px solid Highlight; outline-offset: 2px; }
+
+    .thumb {
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      object-fit: contain;
+      display: block;
+      background-image:
+        linear-gradient(45deg, color-mix(in srgb, CanvasText 8%, Canvas) 25%, transparent 25%),
+        linear-gradient(-45deg, color-mix(in srgb, CanvasText 8%, Canvas) 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, color-mix(in srgb, CanvasText 8%, Canvas) 75%),
+        linear-gradient(-45deg, transparent 75%, color-mix(in srgb, CanvasText 8%, Canvas) 75%);
+      background-size: 18px 18px;
+      background-position: 0 0, 0 9px, 9px -9px, -9px 0;
+    }
+
+    .frame-meta {
+      padding: 8px;
+      display: grid;
+      gap: 5px;
+    }
+
+    .frame-order { font-weight: 800; font-size: .82rem; }
+    .frame-name {
+      font-size: .75rem;
+      opacity: .72;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .frame-actions {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 5px;
+    }
+
+    .frame-actions button {
+      width: 100%;
+      margin: 0;
+      padding: 5px 6px;
+      border-radius: 7px;
+      border: 1px solid color-mix(in srgb, CanvasText 17%, transparent);
+      background: Canvas;
+      color: CanvasText;
+      font-size: .75rem;
+      font-weight: 700;
+    }
+
     .grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 14px;
-      margin-top: 18px;
+      margin-top: 20px;
     }
 
     label.option {
@@ -96,6 +178,18 @@
       font: inherit;
     }
 
+    .hint {
+      font-size: .78rem;
+      opacity: .65;
+      line-height: 1.35;
+    }
+
+    .rife-status {
+      margin-top: 8px;
+      font-size: .82rem;
+      min-height: 1.2em;
+    }
+
     .checkbox {
       display: flex;
       align-items: center;
@@ -103,7 +197,7 @@
       margin-top: 16px;
     }
 
-    button {
+    #submitButton {
       width: 100%;
       margin-top: 20px;
       padding: 13px 16px;
@@ -117,45 +211,78 @@
     }
 
     button:disabled {
-      opacity: .6;
-      cursor: progress;
+      opacity: .55;
+      cursor: not-allowed;
+    }
+
+    .progress-wrap {
+      margin-top: 18px;
+      display: none;
+    }
+
+    .progress-wrap.visible { display: block; }
+
+    .progress-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 7px;
+      font-size: .88rem;
+    }
+
+    .progress-track {
+      height: 12px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: color-mix(in srgb, CanvasText 12%, transparent);
+    }
+
+    #progressBar {
+      width: 0%;
+      height: 100%;
+      background: Highlight;
+      transition: width .2s ease;
     }
 
     #status {
       min-height: 1.4em;
-      margin-top: 12px;
+      margin-top: 10px;
       font-size: .92rem;
-      opacity: .8;
+      opacity: .82;
+      white-space: pre-wrap;
     }
 
     @media (max-width: 620px) {
-      .grid {
-        grid-template-columns: 1fr;
-      }
-
-      main {
-        padding: 18px;
-      }
+      .grid { grid-template-columns: 1fr; }
+      main { padding: 18px; }
+      #frameStrip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
   </style>
 </head>
 <body>
   <main>
-    <h1>Animation Frame Aligner</h1>
+    <h1>WebP Animator</h1>
     <p>
-      Upload raster frames in animation order. The tool aligns adjacent frames
-      by pixel similarity, preserves every source pixel, and generates an animated WebP.
+      Upload raster animation frames, drag them into the order you want, align them by
+      pixel similarity, optionally generate in-between frames with RIFE, then download
+      the finished animated WebP.
     </p>
 
-    <form id="form" action="/generate" method="post" enctype="multipart/form-data">
+    <form id="form" enctype="multipart/form-data">
       <label class="drop" id="dropZone">
-        <input id="frames" type="file" name="frames" accept="image/*" multiple required>
+        <input id="frames" type="file" accept="image/*" multiple>
         <span>
           <strong>Choose frames or drop them here</strong>
           PNG, JPEG, BMP, TIFF or WebP
           <div id="fileSummary">No files selected</div>
         </span>
       </label>
+
+      <div class="frames-header" id="framesHeader" hidden>
+        <strong>Frame order · drag cards to rearrange</strong>
+        <button type="button" class="small-button" id="clearFrames">Clear all</button>
+      </div>
+      <div id="frameStrip" aria-live="polite"></div>
 
       <div class="grid">
         <label class="option">
@@ -174,8 +301,21 @@
         </label>
 
         <label class="option">
-          Frame duration (ms)
-          <input type="number" name="duration" value="100" min="1" max="60000">
+          Source frame duration (ms)
+          <input id="duration" type="number" name="duration" value="100" min="1" max="60000">
+          <span class="hint" id="durationHint">Output: 100 ms/frame</span>
+        </label>
+
+        <label class="option">
+          RIFE interpolation
+          <select id="rifeMultiplier" name="rife_multiplier">
+            <option value="1">None</option>
+            <option value="2">2× · 1 generated frame between originals</option>
+            <option value="4">4× · 3 generated frames between originals</option>
+            <option value="8">8× · 7 generated frames between originals</option>
+          </select>
+          <span class="hint">Alignment runs first, then RIFE generates the in-between frames.</span>
+          <span class="rife-status" id="rifeStatus">Checking RIFE…</span>
         </label>
 
         <label class="option">
@@ -200,6 +340,16 @@
       </label>
 
       <button id="submitButton" type="submit">Generate WebP</button>
+
+      <div class="progress-wrap" id="progressWrap">
+        <div class="progress-top">
+          <span id="progressLabel">Preparing…</span>
+          <strong id="progressPercent">0%</strong>
+        </div>
+        <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progressTrack">
+          <div id="progressBar"></div>
+        </div>
+      </div>
       <div id="status"></div>
     </form>
   </main>
@@ -209,26 +359,206 @@
     const input = document.getElementById("frames");
     const dropZone = document.getElementById("dropZone");
     const summary = document.getElementById("fileSummary");
+    const frameStrip = document.getElementById("frameStrip");
+    const framesHeader = document.getElementById("framesHeader");
+    const clearFrames = document.getElementById("clearFrames");
     const button = document.getElementById("submitButton");
     const status = document.getElementById("status");
+    const progressWrap = document.getElementById("progressWrap");
+    const progressBar = document.getElementById("progressBar");
+    const progressTrack = document.getElementById("progressTrack");
+    const progressLabel = document.getElementById("progressLabel");
+    const progressPercent = document.getElementById("progressPercent");
+    const rifeMultiplier = document.getElementById("rifeMultiplier");
+    const rifeStatus = document.getElementById("rifeStatus");
+    const duration = document.getElementById("duration");
+    const durationHint = document.getElementById("durationHint");
 
-    function updateSummary() {
-      const files = [...input.files];
-      if (!files.length) {
-        summary.textContent = "No files selected";
-        return;
+    let frames = [];
+    let draggedId = null;
+    let rifeReady = false;
+
+    function addFiles(fileList) {
+      for (const file of fileList) {
+        if (!file.type.startsWith("image/")) continue;
+        frames.push({
+          id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
+          file,
+          url: URL.createObjectURL(file),
+        });
       }
-
-      const total = files.reduce((sum, f) => sum + f.size, 0);
-      summary.textContent =
-        `${files.length} frame${files.length === 1 ? "" : "s"} selected · ` +
-        `${(total / 1024 / 1024).toFixed(2)} MB`;
+      input.value = "";
+      renderFrames();
     }
 
-    input.addEventListener("change", updateSummary);
+    function removeFrame(id) {
+      const item = frames.find(frame => frame.id === id);
+      if (item) URL.revokeObjectURL(item.url);
+      frames = frames.filter(frame => frame.id !== id);
+      renderFrames();
+    }
+
+    function moveFrame(id, delta) {
+      const index = frames.findIndex(frame => frame.id === id);
+      if (index < 0) return;
+      const next = index + delta;
+      if (next < 0 || next >= frames.length) return;
+      [frames[index], frames[next]] = [frames[next], frames[index]];
+      renderFrames();
+    }
+
+    function moveBefore(sourceId, targetId) {
+      if (!sourceId || sourceId === targetId) return;
+      const sourceIndex = frames.findIndex(frame => frame.id === sourceId);
+      const targetIndex = frames.findIndex(frame => frame.id === targetId);
+      if (sourceIndex < 0 || targetIndex < 0) return;
+      const [item] = frames.splice(sourceIndex, 1);
+      const adjustedTarget = frames.findIndex(frame => frame.id === targetId);
+      frames.splice(adjustedTarget, 0, item);
+      renderFrames();
+    }
+
+    function renderFrames() {
+      frameStrip.innerHTML = "";
+      framesHeader.hidden = frames.length === 0;
+
+      const total = frames.reduce((sum, item) => sum + item.file.size, 0);
+      summary.textContent = frames.length
+        ? `${frames.length} frame${frames.length === 1 ? "" : "s"} · ${(total / 1024 / 1024).toFixed(2)} MB`
+        : "No files selected";
+
+      frames.forEach((item, index) => {
+        const card = document.createElement("article");
+        card.className = "frame-card";
+        card.draggable = true;
+        card.dataset.id = item.id;
+        card.innerHTML = `
+          <img class="thumb" src="${item.url}" alt="Frame ${index + 1}">
+          <div class="frame-meta">
+            <div class="frame-order">Frame ${index + 1}</div>
+            <div class="frame-name" title="${item.file.name.replaceAll('"', '&quot;')}">${item.file.name}</div>
+            <div class="frame-actions">
+              <button type="button" data-action="left" aria-label="Move frame left">←</button>
+              <button type="button" data-action="right" aria-label="Move frame right">→</button>
+              <button type="button" data-action="remove" aria-label="Remove frame">×</button>
+            </div>
+          </div>`;
+
+        card.addEventListener("dragstart", event => {
+          draggedId = item.id;
+          card.classList.add("drag-source");
+          event.dataTransfer.effectAllowed = "move";
+        });
+
+        card.addEventListener("dragend", () => {
+          draggedId = null;
+          document.querySelectorAll(".frame-card").forEach(node => {
+            node.classList.remove("drag-source", "drag-over");
+          });
+        });
+
+        card.addEventListener("dragover", event => {
+          event.preventDefault();
+          if (draggedId && draggedId !== item.id) card.classList.add("drag-over");
+        });
+
+        card.addEventListener("dragleave", () => card.classList.remove("drag-over"));
+
+        card.addEventListener("drop", event => {
+          event.preventDefault();
+          card.classList.remove("drag-over");
+          moveBefore(draggedId, item.id);
+        });
+
+        card.querySelector('[data-action="left"]').addEventListener("click", () => moveFrame(item.id, -1));
+        card.querySelector('[data-action="right"]').addEventListener("click", () => moveFrame(item.id, 1));
+        card.querySelector('[data-action="remove"]').addEventListener("click", () => removeFrame(item.id));
+
+        frameStrip.appendChild(card);
+      });
+    }
+
+    function setProgress(value, label) {
+      const safe = Math.max(0, Math.min(100, Math.round(value)));
+      progressWrap.classList.add("visible");
+      progressBar.style.width = `${safe}%`;
+      progressPercent.textContent = `${safe}%`;
+      progressTrack.setAttribute("aria-valuenow", String(safe));
+      if (label) progressLabel.textContent = label;
+    }
+
+    function updateDurationHint() {
+      const multiplier = Number(rifeMultiplier.value) || 1;
+      const sourceMs = Math.max(1, Number(duration.value) || 1);
+      const outputMs = Math.max(1, Math.round(sourceMs / multiplier));
+      const fps = (1000 / outputMs).toFixed(outputMs < 100 ? 1 : 2);
+      durationHint.textContent = `Output: ${outputMs} ms/frame · about ${fps} fps`;
+    }
+
+    async function checkRife() {
+      try {
+        const response = await fetch("/rife-status", { cache: "no-store" });
+        const data = await response.json();
+        rifeReady = Boolean(data.ready);
+        rifeStatus.textContent = rifeReady
+          ? "RIFE 4.25 is ready on the server."
+          : "RIFE is not installed yet. Run: python setup_rife.py";
+      } catch {
+        rifeReady = false;
+        rifeStatus.textContent = "Could not check RIFE status.";
+      }
+    }
+
+    function uploadJob(formData) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", "/generate");
+
+        xhr.upload.addEventListener("progress", event => {
+          if (event.lengthComputable) {
+            setProgress((event.loaded / event.total) * 15, "Uploading frames");
+          }
+        });
+
+        xhr.addEventListener("load", () => {
+          if (xhr.status < 200 || xhr.status >= 300) {
+            reject(new Error(xhr.responseText || `Upload failed (${xhr.status})`));
+            return;
+          }
+          try {
+            resolve(JSON.parse(xhr.responseText));
+          } catch {
+            reject(new Error("Server returned an invalid job response."));
+          }
+        });
+
+        xhr.addEventListener("error", () => reject(new Error("Network error while uploading.")));
+        xhr.send(formData);
+      });
+    }
+
+    async function pollJob(jobId) {
+      while (true) {
+        const response = await fetch(`/progress?id=${encodeURIComponent(jobId)}`, { cache: "no-store" });
+        if (!response.ok) throw new Error(await response.text());
+        const data = await response.json();
+
+        const mapped = 15 + (Number(data.progress || 0) * 0.85);
+        setProgress(mapped, data.message || "Processing");
+        status.textContent = data.message || "";
+
+        if (data.status === "done") return data;
+        if (data.status === "error") throw new Error(data.error || data.message || "Generation failed.");
+
+        await new Promise(resolve => setTimeout(resolve, 350));
+      }
+    }
+
+    input.addEventListener("change", () => addFiles(input.files));
 
     ["dragenter", "dragover"].forEach(type => {
       dropZone.addEventListener(type, event => {
+        if (!event.dataTransfer?.types?.includes("Files")) return;
         event.preventDefault();
         dropZone.classList.add("dragging");
       });
@@ -236,56 +566,73 @@
 
     ["dragleave", "drop"].forEach(type => {
       dropZone.addEventListener(type, event => {
+        if (!event.dataTransfer?.types?.includes("Files")) return;
         event.preventDefault();
         dropZone.classList.remove("dragging");
       });
     });
 
     dropZone.addEventListener("drop", event => {
-      const transfer = new DataTransfer();
-      [...event.dataTransfer.files].forEach(file => transfer.items.add(file));
-      input.files = transfer.files;
-      updateSummary();
+      if (event.dataTransfer?.files?.length) addFiles(event.dataTransfer.files);
     });
+
+    clearFrames.addEventListener("click", () => {
+      frames.forEach(item => URL.revokeObjectURL(item.url));
+      frames = [];
+      renderFrames();
+    });
+
+    rifeMultiplier.addEventListener("change", updateDurationHint);
+    duration.addEventListener("input", updateDurationHint);
 
     form.addEventListener("submit", async event => {
       event.preventDefault();
 
-      if (!input.files.length) return;
+      if (!frames.length) {
+        status.textContent = "Add at least one frame first.";
+        return;
+      }
+
+      if (Number(rifeMultiplier.value) > 1 && !rifeReady) {
+        status.textContent = "RIFE is selected but is not installed. Run python setup_rife.py on the server first.";
+        return;
+      }
 
       button.disabled = true;
       button.textContent = "Generating…";
-      status.textContent = "Aligning frames and encoding WebP…";
+      status.textContent = "Preparing upload…";
+      setProgress(0, "Preparing upload");
 
       try {
-        const response = await fetch("/generate", {
-          method: "POST",
-          body: new FormData(form),
-        });
+        const data = new FormData(form);
+        data.delete("frames");
+        frames.forEach(item => data.append("frames", item.file, item.file.name));
 
-        if (!response.ok) {
-          throw new Error(await response.text());
-        }
+        const created = await uploadJob(data);
+        setProgress(15, "Upload complete");
+        const result = await pollJob(created.job_id);
 
-        const blob = await response.blob();
-        const url = URL.createObjectURL(blob);
+        setProgress(100, "Complete");
+        status.textContent = result.message || "Done.";
 
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = "animation.webp";
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-        status.textContent = "Done. animation.webp has been generated.";
+        const link = document.createElement("a");
+        link.href = `/download?id=${encodeURIComponent(created.job_id)}`;
+        link.download = "animation.webp";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
       } catch (error) {
         status.textContent = `Error: ${error.message}`;
+        progressLabel.textContent = "Failed";
       } finally {
         button.disabled = false;
         button.textContent = "Generate WebP";
       }
     });
+
+    renderFrames();
+    updateDurationHint();
+    checkRife();
   </script>
 </body>
 </html>
