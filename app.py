@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, urlparse
 from PIL import Image
 
 from anim_align_webp import (
+    find_best_translation,
     load_rgba,
     register_sequence,
     render_union_canvas,
@@ -147,6 +148,182 @@ def extract_webp_frames(payload: bytes, filename: str):
     }
 
 
+def shrink_larger_frames_to_previous(images: list[Image.Image]):
+    """
+    Shrink oversized frames to fit inside the previous processed frame.
+
+    Frames are never enlarged. If either dimension exceeds the previous frame,
+    the current frame is resized with one uniform scale factor:
+
+        min(previous_width / current_width,
+            previous_height / current_height)
+
+    That is the largest possible scale that fits the complete frame inside the
+    previous frame while preserving aspect ratio. The resized frame then becomes
+    the reference size for the following frame, matching the sequential animation
+    workflow used by registration.
+    """
+    if not images:
+        return [], []
+
+    fitted = [images[0]]
+    scales = [1.0]
+
+    for image in images[1:]:
+        previous = fitted[-1]
+        scale = 1.0
+
+        if image.width > previous.width or image.height > previous.height:
+            scale = min(
+                previous.width / image.width,
+                previous.height / image.height,
+                1.0,
+            )
+
+        if scale < 1.0:
+            new_width = max(1, round(image.width * scale))
+            new_height = max(1, round(image.height * scale))
+            image = image.resize(
+                (new_width, new_height),
+                Image.Resampling.LANCZOS,
+            )
+
+        fitted.append(image)
+        scales.append(scale)
+
+    return fitted, scales
+
+
+def _uniform_resize(image: Image.Image, scale: float) -> Image.Image:
+    if abs(scale - 1.0) < 1e-9:
+        return image
+    width = max(1, round(image.width * scale))
+    height = max(1, round(image.height * scale))
+    return image.resize((width, height), Image.Resampling.LANCZOS)
+
+
+def _scale_search_bounds(anchor: Image.Image, image: Image.Image):
+    """Choose a broad but image-size-aware uniform scale range."""
+    width_ratio = anchor.width / max(1, image.width)
+    height_ratio = anchor.height / max(1, image.height)
+    area_ratio = ((anchor.width * anchor.height) / max(1, image.width * image.height)) ** 0.5
+
+    guesses = [1.0, width_ratio, height_ratio, area_ratio]
+    low = max(0.1, min(guesses) * 0.7)
+    high = min(3.0, max(guesses) * 1.3)
+    if high <= low:
+        high = min(3.0, low + 0.1)
+    return low, high, guesses
+
+
+def find_best_scale_and_translation(
+    anchor: Image.Image,
+    image: Image.Image,
+    *,
+    axis: str,
+    max_shift: int,
+    sigma: float,
+    alpha_threshold: int,
+):
+    """
+    Find the uniform scale and translation that best match ``image`` to ``anchor``.
+
+    The search is deliberately coarse-to-fine. Scaling is uniform only, so aspect
+    ratio can never change. Each tested scale is registered against the same first
+    frame rather than the previous frame, preventing cumulative drift.
+    """
+    low, high, guesses = _scale_search_bounds(anchor, image)
+
+    coarse_count = 11
+    coarse_step = (high - low) / max(1, coarse_count - 1)
+    candidates = {low + coarse_step * i for i in range(coarse_count)}
+    candidates.update(max(low, min(high, guess)) for guess in guesses)
+
+    best = None
+
+    def consider(scale: float, proxy_max_side: int):
+        nonlocal best
+        scaled = _uniform_resize(image, scale)
+        shift = find_best_translation(
+            anchor,
+            scaled,
+            axis=axis,
+            max_shift_x=max_shift,
+            max_shift_y=max_shift,
+            sigma=sigma,
+            alpha_threshold=alpha_threshold,
+            proxy_max_side=proxy_max_side,
+        )
+        candidate = (shift.score, -abs(scale - 1.0), scale, scaled, shift)
+        if best is None or candidate[:2] > best[:2]:
+            best = candidate
+
+    for scale in sorted(candidates):
+        consider(scale, 80)
+
+    best_scale = best[2]
+    refine_radius = max(coarse_step, 0.02)
+    refine_low = max(low, best_scale - refine_radius)
+    refine_high = min(high, best_scale + refine_radius)
+    refine_count = 9
+    refine_step = (refine_high - refine_low) / max(1, refine_count - 1)
+
+    for i in range(refine_count):
+        consider(refine_low + refine_step * i, 120)
+
+    final_scale = best[2]
+    final_image = _uniform_resize(image, final_scale)
+    final_shift = find_best_translation(
+        anchor,
+        final_image,
+        axis=axis,
+        max_shift_x=max_shift,
+        max_shift_y=max_shift,
+        sigma=sigma,
+        alpha_threshold=alpha_threshold,
+        proxy_max_side=160,
+    )
+    return final_image, final_scale, final_shift
+
+
+def fix_frames_to_first(
+    images: list[Image.Image],
+    *,
+    axis: str,
+    max_shift: int,
+    sigma: float,
+    alpha_threshold: int,
+    progress_callback=None,
+):
+    """Scale and pan every frame independently to match frame 1."""
+    if not images:
+        return [], [], []
+
+    anchor = images[0]
+    fixed = [anchor]
+    positions = [(0, 0)]
+    transforms = [(1.0, 0, 0, 1.0)]
+    total = max(1, len(images) - 1)
+
+    for index, image in enumerate(images[1:], start=1):
+        if progress_callback:
+            progress_callback(index, total)
+
+        transformed, scale, shift = find_best_scale_and_translation(
+            anchor,
+            image,
+            axis=axis,
+            max_shift=max_shift,
+            sigma=sigma,
+            alpha_threshold=alpha_threshold,
+        )
+        fixed.append(transformed)
+        positions.append((shift.dx, shift.dy))
+        transforms.append((scale, shift.dx, shift.dy, shift.score))
+
+    return fixed, positions, transforms
+
+
 def set_job(job_id: str, **changes):
     with JOBS_LOCK:
         job = JOBS.get(job_id)
@@ -265,18 +442,77 @@ def process_job(job_id: str, paths: list[Path], settings: dict):
         set_job(job_id, progress=12, message="Loading frames")
         images = [load_rgba(path) for path in paths]
 
-        set_job(job_id, progress=22, message="Registering frame positions")
-        positions, _ = register_sequence(
-            images,
-            axis=settings["axis"],
-            max_shift_x=settings["max_shift"],
-            max_shift_y=settings["max_shift"],
-            sigma=settings["sigma"],
-            alpha_threshold=settings["alpha_threshold"],
-            proxy_max_side=320,
-        )
+        geometry_mode = settings["geometry_mode"]
 
-        set_job(job_id, progress=38, message="Rendering aligned frames")
+        if geometry_mode == "fit_previous":
+            set_job(job_id, progress=18, message="Fitting oversized frames")
+            images, scales = shrink_larger_frames_to_previous(images)
+            resized_count = sum(1 for scale in scales if scale < 1.0)
+            if resized_count:
+                smallest_scale = min(scales)
+                set_job(
+                    job_id,
+                    progress=22,
+                    message=(
+                        f"Fitted {resized_count} oversized frame"
+                        f"{'s' if resized_count != 1 else ''}; "
+                        f"smallest scale {smallest_scale:.3f}×"
+                    ),
+                )
+
+            set_job(job_id, progress=26, message="Registering frame positions")
+            positions, _ = register_sequence(
+                images,
+                axis=settings["axis"],
+                max_shift_x=settings["max_shift"],
+                max_shift_y=settings["max_shift"],
+                sigma=settings["sigma"],
+                alpha_threshold=settings["alpha_threshold"],
+                proxy_max_side=320,
+            )
+
+        elif geometry_mode == "fix_first":
+            def fix_progress(current, total):
+                fraction = current / max(1, total)
+                set_job(
+                    job_id,
+                    progress=18 + round(fraction * 20),
+                    message=f"Matching frame {current + 1}/{total + 1} to frame 1",
+                )
+
+            set_job(job_id, progress=18, message="Optimising scale and pan against frame 1")
+            images, positions, transforms = fix_frames_to_first(
+                images,
+                axis=settings["axis"],
+                max_shift=settings["max_shift"],
+                sigma=settings["sigma"],
+                alpha_threshold=settings["alpha_threshold"],
+                progress_callback=fix_progress,
+            )
+            if len(transforms) > 1:
+                changed = sum(
+                    1 for scale, dx, dy, _ in transforms[1:]
+                    if abs(scale - 1.0) > 0.002 or dx or dy
+                )
+                set_job(
+                    job_id,
+                    progress=39,
+                    message=f"Matched {changed} frame{'s' if changed != 1 else ''} to frame 1",
+                )
+
+        else:
+            set_job(job_id, progress=26, message="Registering frame positions")
+            positions, _ = register_sequence(
+                images,
+                axis=settings["axis"],
+                max_shift_x=settings["max_shift"],
+                max_shift_y=settings["max_shift"],
+                sigma=settings["sigma"],
+                alpha_threshold=settings["alpha_threshold"],
+                proxy_max_side=320,
+            )
+
+        set_job(job_id, progress=40, message="Rendering aligned frames")
         frames, _, _ = render_union_canvas(images, positions)
         duration = settings["duration"]
 
@@ -330,7 +566,7 @@ def process_job(job_id: str, paths: list[Path], settings: dict):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "AnimAlignWebP/2.1"
+    server_version = "AnimAlignWebP/2.3"
 
     def send_bytes(
         self,
@@ -501,6 +737,12 @@ class Handler(BaseHTTPRequestHandler):
         if rife_multiplier not in {1, 2, 4, 8}:
             rife_multiplier = 1
 
+        geometry_mode = fields.get("geometry_mode", "sequential")
+        if geometry_mode not in {"sequential", "fit_previous", "fix_first"}:
+            geometry_mode = "sequential"
+        if fields.get("shrink_larger") == "on" and geometry_mode == "sequential":
+            geometry_mode = "fit_previous"
+
         settings = {
             "axis": axis,
             "max_shift": clamp_int(fields.get("max_shift"), 64, 0, 2000),
@@ -509,6 +751,7 @@ class Handler(BaseHTTPRequestHandler):
             "alpha_threshold": clamp_int(fields.get("alpha_threshold"), 8, 0, 255),
             "quality": clamp_int(fields.get("quality"), 90, 0, 100),
             "lossy": fields.get("lossy") == "on",
+            "geometry_mode": geometry_mode,
             "rife_multiplier": rife_multiplier,
         }
 

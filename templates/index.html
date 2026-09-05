@@ -287,6 +287,16 @@
 
       <div class="grid">
         <label class="option">
+          Frame geometry
+          <select id="geometryMode" name="geometry_mode">
+            <option value="sequential">Align each frame to the previous frame</option>
+            <option value="fit_previous">Shrink oversized frames to fit previous, then align</option>
+            <option value="fix_first">Fix to frame 1: optimise scale + pan against first frame</option>
+          </select>
+          <span class="hint">Fix to frame 1 searches uniform scale and translation independently for every frame, preventing cumulative drift.</span>
+        </label>
+
+        <label class="option">
           Allowed movement
           <select name="axis">
             <option value="xy">Horizontal + vertical</option>
@@ -370,6 +380,7 @@
     const progressTrack = document.getElementById("progressTrack");
     const progressLabel = document.getElementById("progressLabel");
     const progressPercent = document.getElementById("progressPercent");
+    const geometryMode = document.getElementById("geometryMode");
     const rifeMultiplier = document.getElementById("rifeMultiplier");
     const rifeStatus = document.getElementById("rifeStatus");
     const duration = document.getElementById("duration");
@@ -475,8 +486,12 @@
               updateDurationHint();
             }
 
+            if (!hadFramesBefore && index === 0 && extracted.animated) {
+              geometryMode.value = "fix_first";
+            }
+
             status.textContent = extracted.animated
-              ? `Extracted ${extracted.frame_count} frames from ${file.name}.`
+              ? `Extracted ${extracted.frame_count} frames from ${file.name}. Fix-to-frame-1 mode selected.`
               : `${file.name} is a static WebP; loaded it as one frame.`;
             setProgress(10, status.textContent);
           } else {
