@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Animation Frame Aligner</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: Canvas;
+      color: CanvasText;
+    }
+
+    main {
+      width: min(760px, 100%);
+      border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+      border-radius: 18px;
+      padding: 24px;
+      box-shadow: 0 14px 50px color-mix(in srgb, CanvasText 8%, transparent);
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: clamp(1.5rem, 4vw, 2.2rem);
+    }
+
+    p {
+      margin: 0 0 20px;
+      opacity: .75;
+      line-height: 1.45;
+    }
+
+    .drop {
+      display: grid;
+      place-items: center;
+      min-height: 180px;
+      border: 2px dashed color-mix(in srgb, CanvasText 25%, transparent);
+      border-radius: 14px;
+      padding: 22px;
+      text-align: center;
+      cursor: pointer;
+      transition: .15s ease;
+    }
+
+    .drop.dragging {
+      border-color: Highlight;
+      background: color-mix(in srgb, Highlight 10%, transparent);
+    }
+
+    .drop input {
+      display: none;
+    }
+
+    .drop strong {
+      display: block;
+      margin-bottom: 6px;
+    }
+
+    #fileSummary {
+      margin-top: 12px;
+      font-size: .95rem;
+      opacity: .75;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 18px;
+    }
+
+    label.option {
+      display: grid;
+      gap: 7px;
+      font-size: .9rem;
+    }
+
+    select, input[type="number"] {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid color-mix(in srgb, CanvasText 20%, transparent);
+      background: Canvas;
+      color: CanvasText;
+      font: inherit;
+    }
+
+    .checkbox {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      margin-top: 16px;
+    }
+
+    button {
+      width: 100%;
+      margin-top: 20px;
+      padding: 13px 16px;
+      border: 0;
+      border-radius: 11px;
+      background: Highlight;
+      color: HighlightText;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      opacity: .6;
+      cursor: progress;
+    }
+
+    #status {
+      min-height: 1.4em;
+      margin-top: 12px;
+      font-size: .92rem;
+      opacity: .8;
+    }
+
+    @media (max-width: 620px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+
+      main {
+        padding: 18px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Animation Frame Aligner</h1>
+    <p>
+      Upload raster frames in animation order. The tool aligns adjacent frames
+      by pixel similarity, preserves every source pixel, and generates an animated WebP.
+    </p>
+
+    <form id="form" action="/generate" method="post" enctype="multipart/form-data">
+      <label class="drop" id="dropZone">
+        <input id="frames" type="file" name="frames" accept="image/*" multiple required>
+        <span>
+          <strong>Choose frames or drop them here</strong>
+          PNG, JPEG, BMP, TIFF or WebP
+          <div id="fileSummary">No files selected</div>
+        </span>
+      </label>
+
+      <div class="grid">
+        <label class="option">
+          Allowed movement
+          <select name="axis">
+            <option value="xy">Horizontal + vertical</option>
+            <option value="x">Horizontal only</option>
+            <option value="y">Vertical only</option>
+            <option value="none">Do not align</option>
+          </select>
+        </label>
+
+        <label class="option">
+          Maximum shift per frame (px)
+          <input type="number" name="max_shift" value="64" min="0" max="2000">
+        </label>
+
+        <label class="option">
+          Frame duration (ms)
+          <input type="number" name="duration" value="100" min="1" max="60000">
+        </label>
+
+        <label class="option">
+          Similarity softness
+          <input type="number" name="sigma" value="24" min="0.1" max="255" step="0.1">
+        </label>
+
+        <label class="option">
+          Transparent alpha threshold
+          <input type="number" name="alpha_threshold" value="8" min="0" max="255">
+        </label>
+
+        <label class="option">
+          Lossy quality
+          <input type="number" name="quality" value="90" min="0" max="100">
+        </label>
+      </div>
+
+      <label class="checkbox">
+        <input type="checkbox" name="lossy">
+        Use lossy WebP instead of lossless
+      </label>
+
+      <button id="submitButton" type="submit">Generate WebP</button>
+      <div id="status"></div>
+    </form>
+  </main>
+
+  <script>
+    const form = document.getElementById("form");
+    const input = document.getElementById("frames");
+    const dropZone = document.getElementById("dropZone");
+    const summary = document.getElementById("fileSummary");
+    const button = document.getElementById("submitButton");
+    const status = document.getElementById("status");
+
+    function updateSummary() {
+      const files = [...input.files];
+      if (!files.length) {
+        summary.textContent = "No files selected";
+        return;
+      }
+
+      const total = files.reduce((sum, f) => sum + f.size, 0);
+      summary.textContent =
+        `${files.length} frame${files.length === 1 ? "" : "s"} selected · ` +
+        `${(total / 1024 / 1024).toFixed(2)} MB`;
+    }
+
+    input.addEventListener("change", updateSummary);
+
+    ["dragenter", "dragover"].forEach(type => {
+      dropZone.addEventListener(type, event => {
+        event.preventDefault();
+        dropZone.classList.add("dragging");
+      });
+    });
+
+    ["dragleave", "drop"].forEach(type => {
+      dropZone.addEventListener(type, event => {
+        event.preventDefault();
+        dropZone.classList.remove("dragging");
+      });
+    });
+
+    dropZone.addEventListener("drop", event => {
+      const transfer = new DataTransfer();
+      [...event.dataTransfer.files].forEach(file => transfer.items.add(file));
+      input.files = transfer.files;
+      updateSummary();
+    });
+
+    form.addEventListener("submit", async event => {
+      event.preventDefault();
+
+      if (!input.files.length) return;
+
+      button.disabled = true;
+      button.textContent = "Generating…";
+      status.textContent = "Aligning frames and encoding WebP…";
+
+      try {
+        const response = await fetch("/generate", {
+          method: "POST",
+          body: new FormData(form),
+        });
+
+        if (!response.ok) {
+          throw new Error(await response.text());
+        }
+
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "animation.webp";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        status.textContent = "Done. animation.webp has been generated.";
+      } catch (error) {
+        status.textContent = `Error: ${error.message}`;
+      } finally {
+        button.disabled = false;
+        button.textContent = "Generate WebP";
+      }
+    });
+  </script>
+</body>
+</html>
