@@ -1,15 +1,17 @@
 # WebP Animator
 
-A small LAN-accessible Python web tool for building animated WebP files from raster frames.
+A small LAN-accessible Python web tool for building animated WebP files from raster frames or an existing animated WebP.
 
 Features:
 
 - Upload multiple raster frames and preview them as thumbnails.
+- Upload an existing animated WebP and automatically extract all of its frames.
 - Drag frames into the exact animation order before processing.
+- Remove or move individual frames before generation.
 - Pixel-similarity registration with horizontal, vertical, or free X/Y translation.
 - No resizing or source-pixel cropping during registration; the canvas expands as needed.
 - Optional Practical-RIFE 4.25 interpolation at 2x, 4x, or 8x.
-- Live upload, alignment, interpolation, and encoding progress.
+- Live upload, WebP extraction, alignment, interpolation, and encoding progress.
 - Lossless WebP by default, with optional lossy output.
 
 ## Main application setup
@@ -48,6 +50,14 @@ http://<server-LAN-IP>:18743
 
 Your operating-system firewall must allow inbound TCP connections on port `18743`.
 
+## Existing animated WebP input
+
+You can upload a single animated WebP just like any other image.
+
+The server decodes the WebP into its constituent frames and returns them to the browser as PNG frames. Those extracted frames then behave exactly like normal uploaded frames: you can drag them into a new order, move them left or right, remove unwanted frames, align them, and run RIFE interpolation on the chosen sequence.
+
+If the source WebP contains frame-duration metadata, the most common source duration is used as the suggested source frame duration in the UI. The final output still uses the single duration selected in the form.
+
 ## RIFE interpolation
 
 RIFE is optional. The normal align-and-encode workflow works without it.
@@ -82,7 +92,7 @@ After setup, restart `app.py`. The page will report whether RIFE is ready.
 When RIFE is enabled, the pipeline is:
 
 ```text
-uploaded frames
+uploaded raster frames / extracted WebP frames
   -> user-defined drag order
   -> pixel registration
   -> common expanded canvas

@@ -263,17 +263,18 @@
   <main>
     <h1>WebP Animator</h1>
     <p>
-      Upload raster animation frames, drag them into the order you want, align them by
-      pixel similarity, optionally generate in-between frames with RIFE, then download
-      the finished animated WebP.
+      Upload raster animation frames or an existing animated WebP. Animated WebPs are
+      automatically split into their individual frames. Drag everything into the order
+      you want, align by pixel similarity, optionally generate in-between frames with
+      RIFE, then download the finished animated WebP.
     </p>
 
     <form id="form" enctype="multipart/form-data">
       <label class="drop" id="dropZone">
-        <input id="frames" type="file" accept="image/*" multiple>
+        <input id="frames" type="file" accept="image/*,.webp" multiple>
         <span>
-          <strong>Choose frames or drop them here</strong>
-          PNG, JPEG, BMP, TIFF or WebP
+          <strong>Choose frames / animated WebP or drop them here</strong>
+          PNG, JPEG, BMP, TIFF or WebP. Animated WebPs are expanded into draggable frames.
           <div id="fileSummary">No files selected</div>
         </span>
       </label>
@@ -377,18 +378,121 @@
     let frames = [];
     let draggedId = null;
     let rifeReady = false;
+    let addingFiles = false;
 
-    function addFiles(fileList) {
-      for (const file of fileList) {
-        if (!file.type.startsWith("image/")) continue;
-        frames.push({
-          id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
-          file,
-          url: URL.createObjectURL(file),
-        });
+    function isWebP(file) {
+      return file.type === "image/webp" || file.name.toLowerCase().endsWith(".webp");
+    }
+
+    function isImage(file) {
+      return file.type.startsWith("image/") || /\.(png|jpe?g|bmp|tiff?|webp)$/i.test(file.name);
+    }
+
+    function makeFrameItem(file, displayName = file.name) {
+      return {
+        id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
+        file,
+        displayName,
+        url: URL.createObjectURL(file),
+      };
+    }
+
+    function base64ToFile(encoded, name, mime = "image/png") {
+      const binary = atob(encoded);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) {
+        bytes[i] = binary.charCodeAt(i);
       }
-      input.value = "";
-      renderFrames();
+      return new File([bytes], name, { type: mime });
+    }
+
+    function extractWebP(file) {
+      return new Promise((resolve, reject) => {
+        const data = new FormData();
+        data.append("webp", file, file.name);
+
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", "/extract-webp");
+
+        xhr.upload.addEventListener("progress", event => {
+          if (event.lengthComputable) {
+            const pct = (event.loaded / event.total) * 8;
+            setProgress(pct, `Uploading ${file.name} for frame extraction`);
+          }
+        });
+
+        xhr.addEventListener("load", () => {
+          if (xhr.status < 200 || xhr.status >= 300) {
+            reject(new Error(xhr.responseText || `WebP extraction failed (${xhr.status})`));
+            return;
+          }
+          try {
+            resolve(JSON.parse(xhr.responseText));
+          } catch {
+            reject(new Error("Server returned invalid WebP extraction data."));
+          }
+        });
+
+        xhr.addEventListener("error", () => reject(new Error("Network error while extracting WebP frames.")));
+        xhr.send(data);
+      });
+    }
+
+    async function addFiles(fileList) {
+      if (addingFiles) return;
+      addingFiles = true;
+      input.disabled = true;
+      button.disabled = true;
+
+      const incoming = [...fileList].filter(isImage);
+      const hadFramesBefore = frames.length > 0;
+
+      try {
+        for (let index = 0; index < incoming.length; index += 1) {
+          const file = incoming[index];
+
+          if (isWebP(file)) {
+            setProgress(2, `Checking ${file.name}`);
+            status.textContent = `Extracting frames from ${file.name}…`;
+            const extracted = await extractWebP(file);
+
+            for (const extractedFrame of extracted.frames) {
+              const pngFile = base64ToFile(
+                extractedFrame.data,
+                extractedFrame.name,
+                extractedFrame.mime || "image/png",
+              );
+              frames.push(makeFrameItem(pngFile, extractedFrame.name));
+            }
+
+            if (
+              !hadFramesBefore &&
+              index === 0 &&
+              extracted.suggested_duration &&
+              Number(extracted.suggested_duration) > 0
+            ) {
+              duration.value = String(extracted.suggested_duration);
+              updateDurationHint();
+            }
+
+            status.textContent = extracted.animated
+              ? `Extracted ${extracted.frame_count} frames from ${file.name}.`
+              : `${file.name} is a static WebP; loaded it as one frame.`;
+            setProgress(10, status.textContent);
+          } else {
+            frames.push(makeFrameItem(file));
+          }
+        }
+      } catch (error) {
+        status.textContent = `Error: ${error.message}`;
+        progressLabel.textContent = "Failed";
+      } finally {
+        input.value = "";
+        input.disabled = false;
+        button.disabled = false;
+        addingFiles = false;
+        renderFrames();
+      }
     }
 
     function removeFrame(id) {
@@ -424,7 +528,7 @@
 
       const total = frames.reduce((sum, item) => sum + item.file.size, 0);
       summary.textContent = frames.length
-        ? `${frames.length} frame${frames.length === 1 ? "" : "s"} · ${(total / 1024 / 1024).toFixed(2)} MB`
+        ? `${frames.length} frame${frames.length === 1 ? "" : "s"} · ${(total / 1024 / 1024).toFixed(2)} MB ready to process`
         : "No files selected";
 
       frames.forEach((item, index) => {
@@ -432,17 +536,33 @@
         card.className = "frame-card";
         card.draggable = true;
         card.dataset.id = item.id;
-        card.innerHTML = `
-          <img class="thumb" src="${item.url}" alt="Frame ${index + 1}">
-          <div class="frame-meta">
-            <div class="frame-order">Frame ${index + 1}</div>
-            <div class="frame-name" title="${item.file.name.replaceAll('"', '&quot;')}">${item.file.name}</div>
-            <div class="frame-actions">
-              <button type="button" data-action="left" aria-label="Move frame left">←</button>
-              <button type="button" data-action="right" aria-label="Move frame right">→</button>
-              <button type="button" data-action="remove" aria-label="Remove frame">×</button>
-            </div>
-          </div>`;
+
+        const img = document.createElement("img");
+        img.className = "thumb";
+        img.src = item.url;
+        img.alt = `Frame ${index + 1}`;
+
+        const meta = document.createElement("div");
+        meta.className = "frame-meta";
+
+        const order = document.createElement("div");
+        order.className = "frame-order";
+        order.textContent = `Frame ${index + 1}`;
+
+        const name = document.createElement("div");
+        name.className = "frame-name";
+        name.title = item.displayName || item.file.name;
+        name.textContent = item.displayName || item.file.name;
+
+        const actions = document.createElement("div");
+        actions.className = "frame-actions";
+        actions.innerHTML = `
+          <button type="button" data-action="left" aria-label="Move frame left">←</button>
+          <button type="button" data-action="right" aria-label="Move frame right">→</button>
+          <button type="button" data-action="remove" aria-label="Remove frame">×</button>`;
+
+        meta.append(order, name, actions);
+        card.append(img, meta);
 
         card.addEventListener("dragstart", event => {
           draggedId = item.id;
@@ -554,7 +674,11 @@
       }
     }
 
-    input.addEventListener("change", () => addFiles(input.files));
+    input.addEventListener("change", () => {
+      addFiles(input.files).catch(error => {
+        status.textContent = `Error: ${error.message}`;
+      });
+    });
 
     ["dragenter", "dragover"].forEach(type => {
       dropZone.addEventListener(type, event => {
@@ -573,13 +697,18 @@
     });
 
     dropZone.addEventListener("drop", event => {
-      if (event.dataTransfer?.files?.length) addFiles(event.dataTransfer.files);
+      if (event.dataTransfer?.files?.length) {
+        addFiles(event.dataTransfer.files).catch(error => {
+          status.textContent = `Error: ${error.message}`;
+        });
+      }
     });
 
     clearFrames.addEventListener("click", () => {
       frames.forEach(item => URL.revokeObjectURL(item.url));
       frames = [];
       renderFrames();
+      status.textContent = "";
     });
 
     rifeMultiplier.addEventListener("change", updateDurationHint);
@@ -587,6 +716,11 @@
 
     form.addEventListener("submit", async event => {
       event.preventDefault();
+
+      if (addingFiles) {
+        status.textContent = "Finish loading/extracting the selected files first.";
+        return;
+      }
 
       if (!frames.length) {
         status.textContent = "Add at least one frame first.";

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import base64
+import io
 import json
 import os
 import shutil
@@ -9,11 +11,14 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import Counter
 from email.parser import BytesParser
 from email.policy import default
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+
+from PIL import Image
 
 from anim_align_webp import (
     load_rgba,
@@ -27,6 +32,7 @@ HOST = "0.0.0.0"
 PORT = 18743
 MAX_UPLOAD_BYTES = 250 * 1024 * 1024
 JOB_TTL_SECONDS = 60 * 60
+MAX_EXTRACTED_WEBP_FRAMES = 2000
 
 ALLOWED_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"
@@ -85,6 +91,60 @@ def parse_multipart(content_type: str, body: bytes):
             fields[name] = payload.decode(charset, errors="replace")
 
     return fields, files
+
+
+def extract_webp_frames(payload: bytes, filename: str):
+    """Decode all frames of a WebP into PNG payloads for browser-side reordering."""
+    try:
+        image = Image.open(io.BytesIO(payload))
+    except Exception as exc:
+        raise ValueError(f"Could not read WebP: {exc}") from exc
+
+    if image.format != "WEBP":
+        raise ValueError("The uploaded file is not a WebP image.")
+
+    frame_count = getattr(image, "n_frames", 1)
+    if frame_count > MAX_EXTRACTED_WEBP_FRAMES:
+        raise ValueError(
+            f"Animated WebP has {frame_count} frames; the limit is "
+            f"{MAX_EXTRACTED_WEBP_FRAMES}."
+        )
+
+    stem = Path(filename).stem or "animation"
+    frames = []
+    durations = []
+
+    for index in range(frame_count):
+        image.seek(index)
+        duration = int(image.info.get("duration", 0) or 0)
+        if duration > 0:
+            durations.append(duration)
+
+        frame = image.convert("RGBA").copy()
+        buffer = io.BytesIO()
+        frame.save(buffer, format="PNG")
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        frames.append(
+            {
+                "name": f"{stem}-frame-{index + 1:04d}.png",
+                "mime": "image/png",
+                "data": encoded,
+                "source_index": index,
+                "duration": duration or None,
+            }
+        )
+
+    suggested_duration = None
+    if durations:
+        suggested_duration = Counter(durations).most_common(1)[0][0]
+
+    return {
+        "source_name": filename,
+        "animated": frame_count > 1,
+        "frame_count": frame_count,
+        "suggested_duration": suggested_duration,
+        "frames": frames,
+    }
 
 
 def set_job(job_id: str, **changes):
@@ -270,7 +330,7 @@ def process_job(job_id: str, paths: list[Path], settings: dict):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "AnimAlignWebP/2.0"
+    server_version = "AnimAlignWebP/2.1"
 
     def send_bytes(
         self,
@@ -302,6 +362,24 @@ class Handler(BaseHTTPRequestHandler):
             text.encode("utf-8"),
             "text/plain; charset=utf-8",
         )
+
+    def read_upload_body(self):
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError as exc:
+            raise ValueError("Invalid Content-Length.") from exc
+
+        if content_length <= 0:
+            raise ValueError("Empty request.")
+        if content_length > MAX_UPLOAD_BYTES:
+            raise OverflowError("Upload too large. Maximum request size is 250 MB.")
+
+        content_type = self.headers.get("Content-Type", "")
+        if not content_type.startswith("multipart/form-data"):
+            raise ValueError("Expected multipart/form-data.")
+
+        body = self.rfile.read(content_length)
+        return content_type, body
 
     def do_GET(self):
         clean_old_jobs()
@@ -369,31 +447,39 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         clean_old_jobs()
         path = urlparse(self.path).path
+
+        if path == "/extract-webp":
+            try:
+                content_type, body = self.read_upload_body()
+                _, uploads = parse_multipart(content_type, body)
+                uploads = [
+                    (field, filename, payload)
+                    for field, filename, payload in uploads
+                    if field == "webp" and filename
+                ]
+                if len(uploads) != 1:
+                    raise ValueError("Upload exactly one WebP for frame extraction.")
+                _, filename, payload = uploads[0]
+                if Path(filename).suffix.lower() != ".webp":
+                    raise ValueError("Frame extraction accepts WebP files only.")
+                extracted = extract_webp_frames(payload, filename)
+                self.send_json(200, extracted)
+            except OverflowError as exc:
+                self.send_text(413, str(exc))
+            except Exception as exc:
+                self.send_text(400, str(exc))
+            return
+
         if path != "/generate":
             self.send_text(404, "Not found.")
             return
 
         try:
-            content_length = int(self.headers.get("Content-Length", "0"))
-        except ValueError:
-            self.send_text(400, "Invalid Content-Length.")
-            return
-
-        if content_length <= 0:
-            self.send_text(400, "Empty request.")
-            return
-        if content_length > MAX_UPLOAD_BYTES:
-            self.send_text(413, "Upload too large. Maximum request size is 250 MB.")
-            return
-
-        content_type = self.headers.get("Content-Type", "")
-        if not content_type.startswith("multipart/form-data"):
-            self.send_text(400, "Expected multipart/form-data.")
-            return
-
-        try:
-            body = self.rfile.read(content_length)
+            content_type, body = self.read_upload_body()
             fields, uploads = parse_multipart(content_type, body)
+        except OverflowError as exc:
+            self.send_text(413, str(exc))
+            return
         except Exception as exc:
             self.send_text(400, f"Could not parse upload: {exc}")
             return
