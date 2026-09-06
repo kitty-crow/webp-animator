@@ -34,20 +34,23 @@ jobs:
 
       - name: Check Python syntax and unified app import
         run: |
-          python -m py_compile app.py app_openai.py app_all.py global_jobs.py openai_interrogator.py openai_batch.py openai_job_features.py anim_align_webp.py rife_worker.py setup_openai.py setup_rife.py
+          python -m py_compile app.py app_openai.py app_all.py global_jobs.py resilient_bridge.py openai_interrogator.py openai_batch.py openai_job_features.py anim_align_webp.py rife_worker.py setup_openai.py setup_rife.py
           python - <<'PY'
           import app_all
+          from resilient_bridge import ResilientAuditorAwareBridgeClient
           assert b"OpenAI Interrogator" in app_all.INDEX_HTML
           assert b"Recoverable job" in app_all.INDEX_HTML
           assert b"Final WebP preview" in app_all.INDEX_HTML
           assert b"Ignore auditor and continue" in app_all.INDEX_HTML
+          assert isinstance(app_all.enhanced.OPENAI.bridge, ResilientAuditorAwareBridgeClient)
+          assert app_all.enhanced.BATCH.child_manager.bridge is app_all.enhanced.OPENAI.bridge
           status = app_all.enhanced.OPENAI.bridge.status()
           assert "key_configured" in status
           assert "schema_built" in status
           PY
 
       - name: Test job orchestration and persistence
-        run: python -m unittest -v test_openai_interrogator.py test_openai_batch.py test_openai_job_features.py test_global_jobs.py
+        run: python -m unittest -v test_openai_interrogator.py test_openai_batch.py test_openai_job_features.py test_global_jobs.py test_resilient_bridge.py
 
       - name: Check browser and bridge JavaScript syntax
         run: |
