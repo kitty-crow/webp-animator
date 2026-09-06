@@ -365,13 +365,18 @@
 
     jobBox.appendChild(actions);
 
-    const canReview = Boolean(latest) && STOPPED.has(job.status) && !["error", "cancelled"].includes(job.status);
+    const resumableWithoutAttempt = ["budget_wait", "interrupted"].includes(job.status);
+    const canReview = STOPPED.has(job.status)
+      && !["error", "cancelled"].includes(job.status)
+      && (Boolean(latest) || resumableWithoutAttempt);
     reviewBox.hidden = !canReview;
     if (canReview) {
       if (job.status === "done" && latest?.audit?.acceptable) {
         retryButton.textContent = "Reject this result, learn from feedback and try again";
       } else if (job.status === "interrupted") {
         retryButton.textContent = "Resume job";
+      } else if (job.status === "budget_wait") {
+        retryButton.textContent = "Resume with current spend limit";
       } else {
         retryButton.textContent = "Learn from this attempt and try again";
       }
