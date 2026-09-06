@@ -31,17 +31,21 @@ def main() -> int:
         print("vendor/openai-schema is still unavailable.", file=sys.stderr)
         return 1
 
-    bun = os.environ.get("OPENAI_BRIDGE_RUNTIME") or shutil.which("bun")
+    configured = os.environ.get("OPENAI_BRIDGE_RUNTIME")
     npm = shutil.which("npm")
+    bun = shutil.which("bun")
 
-    if bun and Path(bun).name.lower().startswith("bun"):
-        print("Installing/building openai-schema with Bun...")
-        run([bun, "install", "--frozen-lockfile"], SCHEMA)
-        run([bun, "run", "build"], SCHEMA)
-    elif npm:
+    # openai-schema is committed with package-lock.json, so npm ci is the most
+    # deterministic build path when npm is available. Bun remains a supported
+    # fallback, but do not require a Bun lockfile that the vendored repo does not own.
+    if npm:
         print("Installing/building openai-schema with npm...")
         run([npm, "ci"], SCHEMA)
         run([npm, "run", "build"], SCHEMA)
+    elif bun:
+        print("Installing/building openai-schema with Bun...")
+        run([bun, "install"], SCHEMA)
+        run([bun, "run", "build"], SCHEMA)
     else:
         print("npm or Bun is required to build the vendored TypeScript library.", file=sys.stderr)
         return 1
@@ -50,7 +54,10 @@ def main() -> int:
         print(f"Build completed but {DIST} is missing.", file=sys.stderr)
         return 1
 
-    runtime = os.environ.get("OPENAI_BRIDGE_RUNTIME") or shutil.which("bun") or shutil.which("node")
+    if configured:
+        runtime = shutil.which(configured) or configured
+    else:
+        runtime = shutil.which("bun") or shutil.which("node")
     if not runtime:
         print("The library built successfully, but Node.js or Bun is required at runtime.", file=sys.stderr)
         return 1
