@@ -24,7 +24,7 @@ jobs:
             app.py app_all.py global_jobs.py anim_align_webp.py frame1_optimizer.py \
             rife_worker.py rife_selective_worker.py amt_worker.py eden_worker.py speed_worker.py \
             advanced_pipeline.py temporal_v2.py engine_paths.py gpu_match.py smart_frames.py \
-            webp_fast.py worker_common.py temporal_timing.py \
+            webp_fast.py worker_common.py temporal_timing.py engine_progress.py \
             setup_rife.py setup_engine_common.py setup_acceleration.py setup_amt.py setup_eden.py setup_speed.py
           node --check advanced_ui.js
           python - <<'PY'
