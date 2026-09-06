@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
+import time
+import uuid
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -13,13 +17,54 @@ from openai_interrogator import ACTIVE_STATES, OpenAIJobManager, make_contact_sh
 ROOT = Path(__file__).resolve().parent
 
 
-class FullContextJobManager(OpenAIJobManager):
-    """Use every known frame in the optional sequence-context timeline.
+def _atomic_manifest(path: Path, value: dict) -> None:
+    """Write a manifest safely on Windows while the browser is polling it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
+    )
+    temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        for attempt in range(40):
+            try:
+                os.replace(temporary, path)
+                return
+            except PermissionError:
+                if attempt == 39:
+                    raise
+                time.sleep(min(0.01 * (attempt + 1), 0.10))
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
 
-    Immediate temporal anchors are still sent separately at full resolution. The whole
-    animation is represented as a labelled timeline image so the planner/auditor can
-    reason about cadence, direction and loop phase without silently sampling frames.
-    """
+
+class FullContextJobManager(OpenAIJobManager):
+    """Sequence-aware OpenAI worker with Windows-safe durable manifests."""
+
+    def __init__(self, root: Path):
+        self._manifest_io_lock = threading.RLock()
+        super().__init__(root)
+
+    def get(self, job_id: str):
+        try:
+            path = self._manifest_path(job_id)
+        except ValueError:
+            return None
+        with self._manifest_io_lock:
+            if not path.is_file():
+                return None
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+                return value if isinstance(value, dict) else None
+            except Exception:
+                return None
+
+    def _save(self, job):
+        job["updated"] = time.time()
+        with self._manifest_io_lock:
+            _atomic_manifest(self._manifest_path(str(job["id"])), job)
 
     def _context_sheet(self, job):
         if not job["request"].get("whole_sequence_context", True):
@@ -45,9 +90,6 @@ UI_SCRIPT = (ROOT / "openai_ui" / "interrogator.js").read_bytes()
 
 def enhanced_index() -> bytes:
     html = legacy.INDEX_HTML.decode("utf-8")
-    # The semantic interpolation stage belongs before the ordinary alignment/RIFE
-    # controls in the page flow. Accepted OpenAI frames are inserted into the source
-    # sequence first, then the user can use the normal RIFE pass for cheap smoothing.
     marker = '      <div class="grid">'
     if marker not in html:
         raise RuntimeError("Could not find WebP Animator settings grid for OpenAI UI injection.")
@@ -73,7 +115,10 @@ def attempt_path(job_id: str, fraction: float, attempt_number: int) -> Path | No
             _fraction_key(float(item.get("target_fraction", -1))) == key
             and int(item.get("attempt", -1)) == attempt_number
         ):
-            path = OPENAI._job_dir(job_id) / str(item.get("candidate_path", ""))
+            candidate = str(item.get("candidate_path", ""))
+            if not candidate:
+                return None
+            path = OPENAI._job_dir(job_id) / candidate
             return path if path.is_file() else None
     return None
 
@@ -84,14 +129,15 @@ def reopen_for_retry(
     max_spend_usd: float | None,
     target_fraction: float | None,
 ) -> dict:
+    """Requeue a stopped target, including recoverable API/infrastructure errors."""
     with OPENAI._lock_for(job_id):
         job = OPENAI.get(job_id)
         if not job:
             raise KeyError(job_id)
         if job.get("status") in ACTIVE_STATES:
             return OPENAI.public(job)
-        if job.get("status") in {"error", "cancelled"}:
-            raise ValueError("This job cannot be retried from its current state.")
+        if job.get("status") == "cancelled":
+            raise ValueError("A cancelled job cannot be resumed.")
 
         attempts = list(job.get("attempts", []))
         if target_fraction is None:
@@ -114,7 +160,7 @@ def reopen_for_retry(
             latest = matching[-1]
             latest["user_rejected"] = True
             latest["user_feedback"] = feedback.strip()
-        elif job.get("status") not in {"interrupted", "budget_wait"}:
+        elif job.get("status") not in {"interrupted", "budget_wait", "error", "needs_review"}:
             raise ValueError("That target has no previous attempt to learn from.")
 
         request = dict(job.get("request", {}))
@@ -142,7 +188,7 @@ def reopen_for_retry(
         job["message"] = (
             "Retry queued with the previous generated image, audit and user feedback as evidence"
             if matching
-            else "Interrupted/budget-paused target queued to continue"
+            else "Failed/interrupted target queued to continue without re-uploading the animation"
         )
         OPENAI._save(job)
 
@@ -154,8 +200,6 @@ def estimate_request(payload: dict, frame_count: int, width: int, height: int) -
     scope = str(payload.get("scope", "pair")).lower()
     base_payload = dict(payload)
     if scope in {"range", "all"}:
-        # The child estimator validates a single ordinary pair. Batch multiplication is
-        # applied afterwards, giving one coherent worst-case figure to the user.
         base_payload["left_index"] = 0
         base_payload["right_index"] = 1
         base_payload["loop_closure"] = False
@@ -172,7 +216,7 @@ def estimate_request(payload: dict, frame_count: int, width: int, height: int) -
 
 
 class Handler(legacy.Handler):
-    server_version = "AnimAlignWebP/3.1-openai"
+    server_version = "AnimAlignWebP/3.2-openai"
 
     def read_json_body(self, max_bytes: int = 1024 * 1024):
         try:
