@@ -11,12 +11,20 @@ from urllib.parse import parse_qs, urlparse
 import app as legacy
 import app_openai as enhanced
 from global_jobs import GlobalJobStore
+from resilient_bridge import ResilientAuditorAwareBridgeClient
 
 ROOT = Path(__file__).resolve().parent
 GLOBAL = GlobalJobStore(ROOT)
 WORKSPACE_FRAGMENT = (ROOT / "workspace_ui" / "fragment.html").read_text(encoding="utf-8")
 WORKSPACE_SCRIPT = (ROOT / "workspace_ui" / "workspace.js").read_bytes()
 WORKSPACE_OPENAI_LINK = (ROOT / "workspace_ui" / "openai-link.js").read_bytes()
+
+# Planner/auditor structured-output failures are retried adaptively instead of repeating
+# the same undersized reasoning request. The same bridge instance is used by direct and
+# batch OpenAI jobs so both paths get identical recovery and auditor-override behaviour.
+_RESILIENT_BRIDGE = ResilientAuditorAwareBridgeClient(ROOT)
+enhanced.OPENAI.bridge = _RESILIENT_BRIDGE
+enhanced.BATCH.child_manager.bridge = _RESILIENT_BRIDGE
 
 # Global jobs are explicitly user-owned and have no age-based cleanup. OpenAI child
 # jobs linked to them must follow the same rule so a restored global ID never points
@@ -135,7 +143,7 @@ def _resume_interrupted_jobs() -> None:
 
 
 class Handler(enhanced.Handler):
-    server_version = "AnimAlignWebP/4.0-global-jobs"
+    server_version = "AnimAlignWebP/4.1-global-jobs"
 
     def do_GET(self):
         parsed = urlparse(self.path)
