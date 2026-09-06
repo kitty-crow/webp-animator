@@ -23,7 +23,7 @@ jobs:
           python -m py_compile \
             app.py app_all.py global_jobs.py anim_align_webp.py frame1_optimizer.py \
             rife_worker.py rife_selective_worker.py amt_worker.py eden_worker.py speed_worker.py \
-            advanced_pipeline.py engine_paths.py gpu_match.py smart_frames.py \
+            advanced_pipeline.py temporal_v2.py engine_paths.py gpu_match.py smart_frames.py \
             webp_fast.py worker_common.py temporal_timing.py \
             setup_rife.py setup_engine_common.py setup_acceleration.py setup_amt.py setup_eden.py setup_speed.py
           node --check advanced_ui.js
@@ -43,6 +43,7 @@ jobs:
           test_webp_fast.py
           test_smart_frames.py
           test_advanced_features.py
+          test_temporal_v2.py
 
       - name: Ensure retired semantic interpolator is gone
         shell: bash
