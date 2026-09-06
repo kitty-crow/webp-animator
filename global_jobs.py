@@ -44,11 +44,11 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
 
 
 class GlobalJobStore:
-    """Durable top-level WebP Animator jobs.
+    """Durable top-level WebP Animator workspaces.
 
-    A global job is the user's recoverable workspace. It can contain source frames,
-    ordinary render state/result, and links to one or more OpenAI child jobs. Nothing
-    is removed by age. A new workspace gets a new ID, while old IDs remain restorable.
+    Each job keeps source frames, render settings and the latest finished WebP. Nothing
+    is removed by age. Creating a new workspace gives it a new ID while old IDs remain
+    restorable until the user removes them outside the application.
     """
 
     def __init__(self, root: Path):
@@ -110,7 +110,6 @@ class GlobalJobStore:
             "output_path": None,
             "output_available": False,
             "render_count": 0,
-            "openai_jobs": [],
         }
         self.job_dir(job_id).mkdir(parents=True, exist_ok=True)
         return self.save(job)
@@ -127,18 +126,19 @@ class GlobalJobStore:
         staging = job_dir / f".source-{uuid.uuid4().hex}.tmp"
         staging.mkdir(parents=True, exist_ok=False)
         stored: list[dict[str, Any]] = []
-        paths: list[Path] = []
         try:
             for index, (name, payload) in enumerate(uploads):
                 suffix = Path(name).suffix.lower() or ".bin"
                 path = staging / f"{index:06d}{suffix}"
                 path.write_bytes(payload)
-                stored.append({
-                    "index": index,
-                    "name": Path(name).name,
-                    "path": str(Path("source") / path.name),
-                    "size": len(payload),
-                })
+                stored.append(
+                    {
+                        "index": index,
+                        "name": Path(name).name,
+                        "path": str(Path("source") / path.name),
+                        "size": len(payload),
+                    }
+                )
             with self.lock:
                 old = job_dir / f".source-old-{uuid.uuid4().hex}"
                 if source_dir.exists():
@@ -164,13 +164,15 @@ class GlobalJobStore:
     ) -> tuple[dict[str, Any], list[Path]]:
         job, paths = self.save_sources(job_id, uploads, settings)
         job = self.get(job_id) or job
-        job.update({
-            "status": "queued",
-            "progress": 5,
-            "message": "Upload received and persisted",
-            "error": None,
-            "render_count": int(job.get("render_count", 0)) + 1,
-        })
+        job.update(
+            {
+                "status": "queued",
+                "progress": 5,
+                "message": "Upload received and persisted",
+                "error": None,
+                "render_count": int(job.get("render_count", 0)) + 1,
+            }
+        )
         return self.save(job), paths
 
     def update(self, job_id: str, **changes: Any) -> dict[str, Any] | None:
@@ -180,15 +182,6 @@ class GlobalJobStore:
                 return None
             job.update(changes)
             return self.save(job)
-
-    def attach_openai(self, job_id: str, openai_job_id: str) -> dict[str, Any]:
-        job = self.ensure(job_id)
-        linked = list(job.get("openai_jobs", []))
-        if openai_job_id not in linked:
-            linked.append(openai_job_id)
-        job["openai_jobs"] = linked
-        job["last_openai_job_id"] = openai_job_id
-        return self.save(job)
 
     def public(self, job: dict[str, Any]) -> dict[str, Any]:
         output = self.job_dir(str(job["id"])) / "animation.webp"
@@ -203,12 +196,13 @@ class GlobalJobStore:
             "updated": job.get("updated"),
             "settings": job.get("settings", {}),
             "source_count": len(job.get("sources", [])),
-            "source_names": [str(item.get("name", f"frame-{i + 1}.png")) for i, item in enumerate(job.get("sources", []))],
+            "source_names": [
+                str(item.get("name", f"frame-{i + 1}.png"))
+                for i, item in enumerate(job.get("sources", []))
+            ],
             "output_available": output.is_file(),
             "output_size": output.stat().st_size if output.is_file() else 0,
             "render_count": job.get("render_count", 0),
-            "openai_jobs": list(job.get("openai_jobs", [])),
-            "last_openai_job_id": job.get("last_openai_job_id"),
         }
 
     def source_info(self, job_id: str, index: int) -> tuple[Path, str] | None:
@@ -247,7 +241,9 @@ class GlobalJobStore:
                 value = json.loads(manifest.read_text(encoding="utf-8"))
                 if str(value.get("status", "")) in ACTIVE_STATES:
                     value["status"] = "interrupted"
-                    value["message"] = "Server restarted during processing. The persisted job can be rendered again without rebuilding the workspace."
+                    value["message"] = (
+                        "Server restarted during processing. The persisted job can be rendered again without rebuilding the workspace."
+                    )
                     value["updated"] = _now()
                     _atomic_json(manifest, value)
             except Exception:
