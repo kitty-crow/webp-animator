@@ -16,6 +16,13 @@ ROOT = Path(__file__).resolve().parent
 GLOBAL = GlobalJobStore(ROOT)
 WORKSPACE_FRAGMENT = (ROOT / "workspace_ui" / "fragment.html").read_text(encoding="utf-8")
 WORKSPACE_SCRIPT = (ROOT / "workspace_ui" / "workspace.js").read_bytes()
+WORKSPACE_OPENAI_LINK = (ROOT / "workspace_ui" / "openai-link.js").read_bytes()
+
+# Global jobs are explicitly user-owned and have no age-based cleanup. OpenAI child
+# jobs linked to them must follow the same rule so a restored global ID never points
+# at a child that disappeared because a timer elapsed.
+enhanced.OPENAI.cleanup = lambda *args, **kwargs: None
+enhanced.BATCH.cleanup = lambda *args, **kwargs: None
 
 
 def enhanced_index() -> bytes:
@@ -24,7 +31,11 @@ def enhanced_index() -> bytes:
     if marker not in html:
         raise RuntimeError("Could not find WebP Animator form for global-job UI injection.")
     html = html.replace(marker, WORKSPACE_FRAGMENT + "\n\n" + marker, 1)
-    html = html.replace("</body>", '  <script src="/workspace-ui.js"></script>\n</body>', 1)
+    html = html.replace(
+        "</body>",
+        '  <script src="/workspace-ui.js"></script>\n  <script src="/workspace-openai-link.js"></script>\n</body>',
+        1,
+    )
     return html.encode("utf-8")
 
 
@@ -55,8 +66,6 @@ def _persistent_set_job(job_id: str, **changes):
 
 legacy.get_job = _persistent_get_job
 legacy.set_job = _persistent_set_job
-# Global jobs are intentionally never age-expired. Legacy in-memory jobs are not used
-# by this entry point, so do not let the inherited handler erase anything recoverable.
 legacy.clean_old_jobs = lambda: None
 
 
@@ -107,8 +116,6 @@ def _start_global_render(job_id: str, paths: list[Path], settings: dict) -> None
 
 
 def _resume_interrupted_jobs() -> None:
-    # GlobalJobStore marks active jobs interrupted during construction. Their complete
-    # source frames/settings are durable, so restart them automatically.
     for manifest in GLOBAL.root.glob("*/job.json"):
         try:
             job = json.loads(manifest.read_text(encoding="utf-8"))
@@ -141,6 +148,10 @@ class Handler(enhanced.Handler):
 
         if path == "/workspace-ui.js":
             self.send_bytes(200, WORKSPACE_SCRIPT, "text/javascript; charset=utf-8")
+            return
+
+        if path == "/workspace-openai-link.js":
+            self.send_bytes(200, WORKSPACE_OPENAI_LINK, "text/javascript; charset=utf-8")
             return
 
         if path == "/job":
@@ -270,7 +281,7 @@ def main():
     print(f"LAN access:   http://<this-machine-LAN-IP>:{legacy.PORT}")
     print(f"RIFE:         {'ready' if ready else 'not installed'}")
     print(f"OpenAI:       {'configured' if openai_status['key_configured'] else 'no API key'}")
-    print("Global jobs:  durable until explicitly superseded/deleted; no TTL cleanup")
+    print("Global jobs:  durable with no automatic expiry")
     print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()
