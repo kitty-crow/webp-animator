@@ -59,6 +59,8 @@ def reopen_for_retry(
             raise KeyError(job_id)
         if job.get("status") in ACTIVE_STATES:
             return OPENAI.public(job)
+        if job.get("status") in {"error", "cancelled"}:
+            raise ValueError("This job cannot be retried from its current state.")
 
         attempts = list(job.get("attempts", []))
         if target_fraction is None:
@@ -67,20 +69,22 @@ def reopen_for_retry(
                 target_fraction = float(pending)
             elif attempts:
                 target_fraction = float(attempts[-1].get("target_fraction", 0.5))
+            elif job.get("targets_remaining"):
+                target_fraction = float(job["targets_remaining"][0])
             else:
-                raise ValueError("This job has no generated attempt to retry.")
+                raise ValueError("This job has no pending or previous interpolation target to resume.")
 
         key = _fraction_key(float(target_fraction))
         matching = [
             item for item in attempts
             if _fraction_key(float(item.get("target_fraction", -1))) == key
         ]
-        if not matching:
+        if matching:
+            latest = matching[-1]
+            latest["user_rejected"] = True
+            latest["user_feedback"] = feedback.strip()
+        elif job.get("status") not in {"interrupted", "budget_wait"}:
             raise ValueError("That target has no previous attempt to learn from.")
-
-        latest = matching[-1]
-        latest["user_rejected"] = True
-        latest["user_feedback"] = feedback.strip()
 
         request = dict(job.get("request", {}))
         if feedback.strip():
@@ -104,7 +108,11 @@ def reopen_for_retry(
         job["status"] = "queued"
         job["stage"] = "queued"
         job["error"] = None
-        job["message"] = "Retry queued with the previous generated image, audit and user feedback as evidence"
+        job["message"] = (
+            "Retry queued with the previous generated image, audit and user feedback as evidence"
+            if matching
+            else "Interrupted/budget-paused target queued to continue"
+        )
         OPENAI._save(job)
 
     OPENAI._start(job_id)
