@@ -46,8 +46,10 @@ jobs:
       - name: Test OpenAI job orchestration
         run: python -m unittest -v test_openai_interrogator.py test_openai_batch.py
 
-      - name: Check bridge syntax
-        run: node --check openai_bridge/server.mjs
+      - name: Check browser and bridge JavaScript syntax
+        run: |
+          node --check openai_bridge/server.mjs
+          node --check openai_ui/interrogator.js
 
       - name: Smoke-test local bridge without API calls
         shell: bash
@@ -66,7 +68,7 @@ jobs:
               health = json.load(f)
           assert health['ok'] is True
           assert health['key_configured'] is False
-          assert health['version'] >= 3
+          assert health['version'] >= 4
           PY
           curl -fsS -X POST http://127.0.0.1:18745/estimate \
             -H 'content-type: application/json' \
