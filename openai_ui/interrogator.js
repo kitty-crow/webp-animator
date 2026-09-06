@@ -103,9 +103,6 @@
     let value;
     try { value = JSON.parse(text); }
     catch { value = { error: text || `HTTP ${response.status}` }; }
-    // Successful job-status objects are allowed to contain an `error` field when
-    // status=error. HTTP status, not the presence of that field, determines whether
-    // transport itself failed.
     if (!response.ok) throw new Error(value?.error || `HTTP ${response.status}`);
     return value;
   }
@@ -397,12 +394,13 @@
     }
     jobBox.appendChild(actions);
 
-    const resumable = ["needs_review", "budget_wait", "interrupted"].includes(job.status);
+    const resumable = ["needs_review", "budget_wait", "interrupted", "error"].includes(job.status);
     const canRejectAccepted = job.status === "done" && latest?.audit?.acceptable;
     reviewBox.hidden = !(resumable || canRejectAccepted);
     if (!reviewBox.hidden) {
       if (job.status === "interrupted") retryButton.textContent = "Resume job";
       else if (job.status === "budget_wait") retryButton.textContent = "Resume with current spend limit";
+      else if (job.status === "error") retryButton.textContent = "Retry failed step without re-uploading";
       else if (canRejectAccepted) retryButton.textContent = "Reject this result, add feedback and try again";
       else retryButton.textContent = "Learn from this attempt and try again";
     }
@@ -439,8 +437,6 @@
       normalGroups.get(entry.leftIndex).push(entry);
     }
 
-    // Work backwards through source indexes so inserting frames into later gaps cannot
-    // shift the insertion positions for earlier gaps.
     [...normalGroups.entries()]
       .sort((a, b) => b[0] - a[0])
       .forEach(([leftIndex, entries]) => {
