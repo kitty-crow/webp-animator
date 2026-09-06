@@ -252,6 +252,14 @@
       white-space: pre-wrap;
     }
 
+    #downloadLink {
+      display: none;
+      margin-top: 10px;
+      font-weight: 700;
+    }
+
+    #downloadLink.visible { display: inline-block; }
+
     @media (max-width: 620px) {
       .grid { grid-template-columns: 1fr; }
       main { padding: 18px; }
@@ -362,6 +370,7 @@
         </div>
       </div>
       <div id="status"></div>
+      <a id="downloadLink" download="animation.webp">Download animation.webp</a>
     </form>
   </main>
 
@@ -385,11 +394,15 @@
     const rifeStatus = document.getElementById("rifeStatus");
     const duration = document.getElementById("duration");
     const durationHint = document.getElementById("durationHint");
+    const downloadLink = document.getElementById("downloadLink");
 
+    const ACTIVE_JOB_KEY = "webp-animator-active-job";
     let frames = [];
     let draggedId = null;
     let rifeReady = false;
     let addingFiles = false;
+    let activeJobId = null;
+    let monitorGeneration = 0;
 
     function isWebP(file) {
       return file.type === "image/webp" || file.name.toLowerCase().endsWith(".webp");
@@ -415,6 +428,51 @@
         bytes[i] = binary.charCodeAt(i);
       }
       return new File([bytes], name, { type: mime });
+    }
+
+    function sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function waitUntilVisible() {
+      if (!document.hidden) return Promise.resolve();
+      return new Promise(resolve => {
+        const onVisible = () => {
+          if (document.hidden) return;
+          document.removeEventListener("visibilitychange", onVisible);
+          resolve();
+        };
+        document.addEventListener("visibilitychange", onVisible);
+      });
+    }
+
+    function saveActiveJob(jobId) {
+      activeJobId = jobId;
+      try { localStorage.setItem(ACTIVE_JOB_KEY, jobId); } catch {}
+    }
+
+    function clearActiveJob(jobId = null) {
+      if (jobId && activeJobId && jobId !== activeJobId) return;
+      activeJobId = null;
+      try { localStorage.removeItem(ACTIVE_JOB_KEY); } catch {}
+    }
+
+    function savedActiveJob() {
+      try { return localStorage.getItem(ACTIVE_JOB_KEY) || ""; } catch { return ""; }
+    }
+
+    function showDownload(jobId, autoStart = false) {
+      const href = `/download?id=${encodeURIComponent(jobId)}`;
+      downloadLink.href = href;
+      downloadLink.classList.add("visible");
+      if (autoStart) {
+        const link = document.createElement("a");
+        link.href = href;
+        link.download = "animation.webp";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      }
     }
 
     function extractWebP(file) {
@@ -672,21 +730,94 @@
       });
     }
 
-    async function pollJob(jobId) {
-      while (true) {
-        const response = await fetch(`/progress?id=${encodeURIComponent(jobId)}`, { cache: "no-store" });
-        if (!response.ok) throw new Error(await response.text());
-        const data = await response.json();
+    async function pollJob(jobId, generation) {
+      let transientFailures = 0;
 
-        const mapped = 15 + (Number(data.progress || 0) * 0.85);
-        setProgress(mapped, data.message || "Processing");
-        status.textContent = data.message || "";
+      while (generation === monitorGeneration) {
+        if (document.hidden) {
+          await waitUntilVisible();
+          if (generation !== monitorGeneration) return null;
+        }
 
-        if (data.status === "done") return data;
-        if (data.status === "error") throw new Error(data.error || data.message || "Generation failed.");
+        try {
+          const response = await fetch(`/progress?id=${encodeURIComponent(jobId)}`, { cache: "no-store" });
 
-        await new Promise(resolve => setTimeout(resolve, 350));
+          if (response.status === 404) {
+            clearActiveJob(jobId);
+            throw new Error("The saved job is no longer available on the server.");
+          }
+
+          if (!response.ok) {
+            throw new Error(`Progress check failed (${response.status})`);
+          }
+
+          transientFailures = 0;
+          const data = await response.json();
+          const mapped = 15 + (Number(data.progress || 0) * 0.85);
+          setProgress(mapped, data.message || "Processing");
+          status.textContent = data.message || "";
+
+          if (data.status === "done") return data;
+          if (data.status === "error") {
+            clearActiveJob(jobId);
+            throw new Error(data.error || data.message || "Generation failed.");
+          }
+        } catch (error) {
+          if (error.message.includes("saved job is no longer available")) throw error;
+          transientFailures += 1;
+          status.textContent = document.hidden
+            ? "Processing continues on the server. Progress will refresh when you return."
+            : `Processing continues on the server. Reconnecting…${transientFailures > 1 ? ` (${transientFailures})` : ""}`;
+          await sleep(Math.min(5000, 750 * transientFailures));
+          continue;
+        }
+
+        await sleep(750);
       }
+
+      return null;
+    }
+
+    async function monitorJob(jobId, { resumed = false, autoDownload = true } = {}) {
+      const generation = ++monitorGeneration;
+      saveActiveJob(jobId);
+      button.disabled = true;
+      button.textContent = resumed ? "Resuming job…" : "Generating…";
+      downloadLink.classList.remove("visible");
+
+      if (resumed) {
+        setProgress(15, "Reconnecting to running job");
+        status.textContent = "Reconnected to the job. Processing continued on the server while this tab was away.";
+      } else {
+        setProgress(15, "Upload complete · processing on server");
+        status.textContent = "Upload complete. The job is now running on the server; you can switch tabs or leave the browser.";
+      }
+
+      try {
+        const result = await pollJob(jobId, generation);
+        if (!result || generation !== monitorGeneration) return;
+
+        clearActiveJob(jobId);
+        setProgress(100, "Complete");
+        status.textContent = result.message || "Done.";
+        showDownload(jobId, autoDownload && !document.hidden);
+      } catch (error) {
+        if (generation !== monitorGeneration) return;
+        status.textContent = `Error: ${error.message}`;
+        progressLabel.textContent = "Failed";
+      } finally {
+        if (generation === monitorGeneration) {
+          button.disabled = false;
+          button.textContent = "Generate WebP";
+        }
+      }
+    }
+
+    async function resumeSavedJob() {
+      const jobId = savedActiveJob();
+      if (!jobId) return;
+      activeJobId = jobId;
+      await monitorJob(jobId, { resumed: true, autoDownload: false });
     }
 
     input.addEventListener("change", () => {
@@ -726,6 +857,19 @@
       status.textContent = "";
     });
 
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden && activeJobId) {
+        status.textContent = "Back in the tab. Refreshing server progress…";
+      }
+    });
+
+    window.addEventListener("pageshow", () => {
+      if (!activeJobId) {
+        const saved = savedActiveJob();
+        if (saved) resumeSavedJob();
+      }
+    });
+
     rifeMultiplier.addEventListener("change", updateDurationHint);
     duration.addEventListener("input", updateDurationHint);
 
@@ -747,9 +891,12 @@
         return;
       }
 
+      ++monitorGeneration;
+      clearActiveJob();
+      downloadLink.classList.remove("visible");
       button.disabled = true;
-      button.textContent = "Generating…";
-      status.textContent = "Preparing upload…";
+      button.textContent = "Uploading…";
+      status.textContent = "Preparing upload… Keep this tab open until the upload reaches the server.";
       setProgress(0, "Preparing upload");
 
       try {
@@ -758,22 +905,10 @@
         frames.forEach(item => data.append("frames", item.file, item.file.name));
 
         const created = await uploadJob(data);
-        setProgress(15, "Upload complete");
-        const result = await pollJob(created.job_id);
-
-        setProgress(100, "Complete");
-        status.textContent = result.message || "Done.";
-
-        const link = document.createElement("a");
-        link.href = `/download?id=${encodeURIComponent(created.job_id)}`;
-        link.download = "animation.webp";
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
+        await monitorJob(created.job_id, { resumed: false, autoDownload: true });
       } catch (error) {
         status.textContent = `Error: ${error.message}`;
         progressLabel.textContent = "Failed";
-      } finally {
         button.disabled = false;
         button.textContent = "Generate WebP";
       }
@@ -782,6 +917,7 @@
     renderFrames();
     updateDurationHint();
     checkRife();
+    resumeSavedJob();
   </script>
 </body>
 </html>
