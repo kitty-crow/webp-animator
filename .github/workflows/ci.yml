@@ -20,16 +20,28 @@ jobs:
 
       - name: Check Python syntax and persistent app import
         run: |
-          python -m py_compile app.py app_all.py global_jobs.py anim_align_webp.py frame1_optimizer.py rife_worker.py setup_rife.py
+          python -m py_compile \
+            app.py app_all.py global_jobs.py anim_align_webp.py frame1_optimizer.py \
+            rife_worker.py rife_selective_worker.py amt_worker.py eden_worker.py speed_worker.py \
+            advanced_pipeline.py advanced_ui.js engine_paths.py gpu_match.py smart_frames.py \
+            webp_fast.py worker_common.py temporal_timing.py \
+            setup_rife.py setup_engine_common.py setup_acceleration.py setup_amt.py setup_eden.py setup_speed.py
           python - <<'PY'
           import app_all
           assert b"Recoverable job" in app_all.INDEX_HTML
           assert b"Final WebP preview" in app_all.INDEX_HTML
           assert b"workspace-ui.js" in app_all.INDEX_HTML
+          assert b"advanced-ui.js" in app_all.INDEX_HTML
           PY
 
-      - name: Test durable jobs and frame-1 optimiser
-        run: python -m unittest -v test_global_jobs.py test_frame1_optimizer.py
+      - name: Test durable jobs, geometry, smart frames and WebP encoding
+        run: >-
+          python -m unittest -v
+          test_global_jobs.py
+          test_frame1_optimizer.py
+          test_webp_fast.py
+          test_smart_frames.py
+          test_advanced_features.py
 
       - name: Ensure retired semantic interpolator is gone
         shell: bash
