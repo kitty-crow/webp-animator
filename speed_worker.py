@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import gc
 import os
 import sys
 from pathlib import Path
@@ -10,7 +9,18 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from worker_common import alpha_midpoint, compose_rgb_with_alpha, content_bbox, load_rgba, read_manifest, write_result
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+from worker_common import (
+    alpha_midpoint,
+    compose_rgb_with_alpha,
+    content_bbox,
+    is_cuda_oom,
+    load_rgba,
+    read_manifest,
+    release_cuda,
+    write_result,
+)
 
 
 def parse_args():
@@ -30,7 +40,6 @@ def _precision_for_device(torch, device) -> str:
     if device.type != "cuda":
         return "fp32"
     major, _ = torch.cuda.get_device_capability(device)
-    # Pascal cards do not support native BF16. FP16 keeps memory manageable there.
     return "bf16" if major >= 8 else "fp16"
 
 
@@ -69,6 +78,9 @@ def main():
         strict_load=False,
     )
     model.eval()
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = False
+        release_cuda(torch)
 
     torch.manual_seed(int(manifest.get("seed", 0)))
     if torch.cuda.is_available():
@@ -89,7 +101,7 @@ def main():
             crop0 = first.crop(bbox)
             crop1 = second.crop(bbox)
             original_size = crop0.size
-            last_error = None
+            last_message = None
             rgb_result = None
             for scale in ((1.0, 0.75, 0.5, 0.375) if device.type == "cuda" else (1.0,)):
                 try:
@@ -107,15 +119,13 @@ def main():
                     if rgb_result.size != original_size:
                         rgb_result = rgb_result.resize(original_size, Image.Resampling.LANCZOS)
                     break
-                except torch.OutOfMemoryError as exc:
-                    last_error = exc
-                    if device.type == "cuda":
-                        torch.cuda.empty_cache()
-                    gc.collect()
+                except Exception as exc:
+                    if not is_cuda_oom(torch, exc):
+                        raise
+                    last_message = str(exc)
+                    release_cuda(torch)
             if rgb_result is None:
-                if last_error is not None:
-                    raise last_error
-                raise RuntimeError("SPEED failed to generate a frame")
+                raise RuntimeError(last_message or "SPEED failed to generate a frame")
 
             alpha = alpha_midpoint(crop0, crop1)
             generated = compose_rgb_with_alpha(rgb_result, alpha, first.size, bbox)
@@ -124,9 +134,7 @@ def main():
         generated.save(path)
         results.append({"id": task.get("id", str(task_index)), "frame": str(path)})
         print(f"PROGRESS {task_index + 1} {max(1, len(tasks))}", flush=True)
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
-        gc.collect()
+        release_cuda(torch)
 
     write_result(args.result, {"tasks": results, "precision": precision})
 
