@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
 import tempfile
-import time
 import unittest
 from pathlib import Path
 
@@ -58,17 +56,17 @@ class GlobalJobStoreTests(unittest.TestCase):
             self.assertIsNotNone(store.get(first))
             self.assertIsNotNone(store.get(second))
 
-    def test_openai_children_are_linked_to_global_job(self):
+    def test_public_manifest_contains_only_render_workspace_state(self):
         with tempfile.TemporaryDirectory() as temporary:
             store = GlobalJobStore(Path(temporary))
             job_id = "e" * 32
-            child = "f" * 32
-            store.ensure(job_id)
-            store.attach_openai(job_id, child)
-            store.attach_openai(job_id, child)
-            public = store.public(store.get(job_id))
-            self.assertEqual(public["openai_jobs"], [child])
-            self.assertEqual(public["last_openai_job_id"], child)
+            job = store.ensure(job_id)
+            public = store.public(job)
+            self.assertEqual(public["id"], job_id)
+            self.assertEqual(public["kind"], "global")
+            self.assertEqual(public["source_count"], 0)
+            self.assertFalse(public["output_available"])
+            self.assertEqual(public["render_count"], 0)
 
 
 if __name__ == "__main__":
