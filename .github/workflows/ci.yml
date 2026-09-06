@@ -18,14 +18,15 @@ jobs:
       - name: Install Python dependencies
         run: python -m pip install -r requirements.txt
 
-      - name: Check Python syntax and persistent app import
+      - name: Check Python syntax, browser script and persistent app import
         run: |
           python -m py_compile \
             app.py app_all.py global_jobs.py anim_align_webp.py frame1_optimizer.py \
             rife_worker.py rife_selective_worker.py amt_worker.py eden_worker.py speed_worker.py \
-            advanced_pipeline.py advanced_ui.js engine_paths.py gpu_match.py smart_frames.py \
+            advanced_pipeline.py engine_paths.py gpu_match.py smart_frames.py \
             webp_fast.py worker_common.py temporal_timing.py \
             setup_rife.py setup_engine_common.py setup_acceleration.py setup_amt.py setup_eden.py setup_speed.py
+          node --check advanced_ui.js
           python - <<'PY'
           import app_all
           assert b"Recoverable job" in app_all.INDEX_HTML
