@@ -9,6 +9,7 @@ from PIL import Image, ImageChops
 import advanced_pipeline
 import app
 import app_all
+from global_jobs import GlobalJobStore
 
 
 class AdvancedFeatureTests(unittest.TestCase):
@@ -42,6 +43,32 @@ class AdvancedFeatureTests(unittest.TestCase):
         self.assertEqual(settings["rife_multiplier"], 4)
         self.assertNotIn("frames_to_fill", settings)
         self.assertEqual(settings["loop_analysis"], "off")
+
+    def test_analysis_staging_is_isolated_from_render_sources(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            old_global = app_all.GLOBAL
+            try:
+                app_all.GLOBAL = GlobalJobStore(Path(temporary))
+                job_id = app_all.GLOBAL.new_id()
+                _, render_paths = app_all.GLOBAL.save_sources(
+                    job_id,
+                    [("render.png", b"render-source")],
+                    {"duration": 100},
+                )
+                render_path = render_paths[0]
+                analysis_id = "a" * 32
+                analysis_paths, sources = app_all._stage_analysis_sources(
+                    job_id,
+                    analysis_id,
+                    [("analysis.png", b"analysis-source")],
+                )
+
+                self.assertEqual(render_path.read_bytes(), b"render-source")
+                self.assertEqual(analysis_paths[0].read_bytes(), b"analysis-source")
+                self.assertNotEqual(render_path.parent, analysis_paths[0].parent)
+                self.assertIn("analysis", sources[0]["path"])
+            finally:
+                app_all.GLOBAL = old_global
 
     def test_target_gap_parser_accepts_display_pairs(self):
         self.assertEqual(advanced_pipeline.parse_target_gaps("1-2, 4-5"), {0, 3})
