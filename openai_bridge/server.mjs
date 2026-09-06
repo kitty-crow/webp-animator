@@ -29,6 +29,12 @@ function errorText(error) {
   return String(error);
 }
 
+function clamp(value, minimum, maximum) {
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue)) return minimum;
+  return Math.max(minimum, Math.min(maximum, numberValue));
+}
+
 function dataUrl(base64, mime = "image/png") {
   return `data:${mime};base64,${base64}`;
 }
@@ -39,7 +45,12 @@ function imagePart(base64, mime = "image/png") {
 
 function modelBody(model, effort, maxOutputTokens = 2600) {
   const body = { model, store: false, max_output_tokens: maxOutputTokens };
-  if (reasoningEfforts.has(effort)) body.reasoning = { effort };
+  const requested = reasoningEfforts.has(effort) ? effort : "medium";
+  if (model === "gpt-6-astra" && requested === "none") {
+    body.reasoning = { effort: "low" };
+  } else {
+    body.reasoning = { effort: requested };
+  }
   return body;
 }
 
@@ -117,7 +128,53 @@ Evaluate whether the candidate frame is a sensible temporal state between the tw
 Do not assume the images contain a person or character. Infer the subject and motion from the images.
 Judge temporal placement, consistency with both anchors, adherence to the user's intent and interpolation plan, preservation of visual invariants, structural coherence, and whether unrelated regions changed unnecessarily.
 Scores are rubric scores from 0 to 100, not probabilities. Be strict. A visually attractive image is not sufficient if it is the wrong temporal state or changes unrelated content.
+Set acceptable=true only when the candidate is genuinely usable as an animation frame, not merely plausible in isolation. Any severe structural error, wrong temporal direction, materially changed invariant, or clear instruction mismatch must make the candidate unacceptable.
 For a rejected attempt, identify what should be preserved from it and what must change on retry. If the sequence is a loop, also consider whether the candidate improves cyclic continuity.`;
+
+function normalisePlan(value, requestedFraction) {
+  value.target_fraction = clamp(requestedFraction, 0, 1);
+  value.benefit_score = Math.round(clamp(value.benefit_score, 0, 100));
+  value.recommended_next_fraction = clamp(value.recommended_next_fraction, 0, 1);
+  if (Array.isArray(value.changing_regions)) {
+    value.changing_regions = value.changing_regions.map(item => ({
+      ...item,
+      confidence: Math.round(clamp(item?.confidence, 0, 100)),
+    }));
+  }
+  return value;
+}
+
+function normaliseAudit(value) {
+  const scoreFields = [
+    "overall_score",
+    "temporal_position_score",
+    "source_consistency_score",
+    "instruction_match_score",
+    "invariant_preservation_score",
+    "structural_coherence_score",
+    "unnecessary_change_score",
+    "benefit_score",
+  ];
+  for (const field of scoreFields) value[field] = Math.round(clamp(value[field], 0, 100));
+  if (Array.isArray(value.violations)) {
+    value.violations = value.violations.map(item => ({
+      ...item,
+      severity: Math.round(clamp(item?.severity, 0, 100)),
+    }));
+  }
+
+  const severeViolation = Array.isArray(value.violations)
+    && value.violations.some(item => Number(item?.severity || 0) >= 75);
+  const hardScoresPass = value.overall_score >= 80
+    && value.temporal_position_score >= 72
+    && value.source_consistency_score >= 78
+    && value.invariant_preservation_score >= 78
+    && value.structural_coherence_score >= 75;
+
+  value.acceptable = Boolean(value.acceptable && hardScoresPass && !severeViolation);
+  if (!value.acceptable) value.retry_recommended = true;
+  return value;
+}
 
 async function runPlan(payload) {
   if (!API_KEY) throw new Error("OPENAI_API_KEY is not configured.");
@@ -125,12 +182,13 @@ async function runPlan(payload) {
   const effort = String(payload.planner_effort || "medium");
   const client = new OpenAISchema(API_KEY, planShape, undefined, { conversation: false, base: BASE });
 
+  const requestedFraction = Number(payload.target_fraction ?? 0.5);
   const content = [
     { type: "input_text", text: `${PLANNER_BASE}\n\nRequest metadata:\n${JSON.stringify({
       sequence_mode: payload.sequence_mode || "open",
       gap_type: payload.gap_type || "interior",
-      target_fraction: Number(payload.target_fraction ?? 0.5),
-      global_fraction: Number(payload.global_fraction ?? payload.target_fraction ?? 0.5),
+      target_fraction: requestedFraction,
+      global_fraction: Number(payload.global_fraction ?? requestedFraction),
       user_instruction: String(payload.user_instruction || ""),
       previous_plan: payload.previous_plan || null,
       previous_audit: payload.previous_audit || null,
@@ -154,7 +212,7 @@ async function runPlan(payload) {
     retryDelayMs: 250,
   });
 
-  return { plan: value, usage: client.lastUsage || null, model };
+  return { plan: normalisePlan(value, requestedFraction), usage: client.lastUsage || null, model };
 }
 
 async function runAudit(payload) {
@@ -184,7 +242,7 @@ async function runAudit(payload) {
     retryDelayMs: 250,
   });
 
-  return { audit: value, usage: client.lastUsage || null, model };
+  return { audit: normaliseAudit(value), usage: client.lastUsage || null, model };
 }
 
 function b64ToBlob(value, mime = "image/png") {
@@ -192,44 +250,53 @@ function b64ToBlob(value, mime = "image/png") {
   return new Blob([bytes], { type: mime });
 }
 
+function parseRequestedSize(size) {
+  const match = /^(\d+)x(\d+)$/u.exec(String(size || ""));
+  if (!match) return null;
+  return { width: Number(match[1]), height: Number(match[2]) };
+}
+
+function pngDimensions(base64) {
+  const buffer = Buffer.from(base64, "base64");
+  const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  if (buffer.length < 24 || !buffer.subarray(0, 8).equals(signature)) return null;
+  return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+}
+
 async function runGenerate(payload) {
   if (!API_KEY) throw new Error("OPENAI_API_KEY is not configured.");
   const model = String(payload.image_model || "gpt-image-2");
   const quality = imageQualities.has(payload.image_quality) ? payload.image_quality : "medium";
-  const prompt = String(payload.generation_instruction || "").trim();
-  if (!prompt) throw new Error("generation_instruction is required.");
+  const rawPrompt = String(payload.generation_instruction || "").trim();
+  if (!rawPrompt) throw new Error("generation_instruction is required.");
 
   const refs = Array.isArray(payload.references) ? payload.references : [];
   if (refs.length < 2) throw new Error("At least two reference images are required.");
 
-  function makeForm(size) {
-    const form = new FormData();
-    form.append("model", model);
-    form.append("prompt", prompt);
-    form.append("quality", quality);
-    form.append("output_format", "png");
-    if (size) form.append("size", String(size));
-    if (payload.transparent !== false) form.append("background", "transparent");
-    refs.forEach((ref, index) => {
-      form.append("image[]", b64ToBlob(ref.image_b64, ref.mime || "image/png"), `reference-${index + 1}.png`);
-    });
-    return form;
-  }
+  const roleInstruction = refs.length >= 3
+    ? "Reference image 1 is the earlier temporal anchor. Reference image 2 is the later temporal anchor. Reference image 3 is a previous rejected generation: use it only as negative/corrective evidence, preserve aspects explicitly identified as good, and do not copy its diagnosed failures."
+    : "Reference image 1 is the earlier temporal anchor. Reference image 2 is the later temporal anchor. Treat both as hard temporal constraints, not loose style references.";
+  const prompt = `${roleInstruction}\n\n${rawPrompt}`;
+  const requested = parseRequestedSize(payload.size);
+  if (!requested) throw new Error("An exact output size in WIDTHxHEIGHT form is required for animation interpolation.");
 
-  async function send(size) {
-    return await fetch(`${BASE}/images/edits`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${API_KEY}` },
-      body: makeForm(size),
-    });
-  }
+  const form = new FormData();
+  form.append("model", model);
+  form.append("prompt", prompt);
+  form.append("quality", quality);
+  form.append("output_format", "png");
+  form.append("size", `${requested.width}x${requested.height}`);
+  if (payload.transparent !== false) form.append("background", "transparent");
+  refs.forEach((ref, index) => {
+    form.append("image[]", b64ToBlob(ref.image_b64, ref.mime || "image/png"), `reference-${index + 1}.png`);
+  });
 
-  let response = await send(payload.size || null);
-  let raw = await response.text();
-  if (!response.ok && response.status === 400 && payload.size) {
-    response = await send(null);
-    raw = await response.text();
-  }
+  const response = await fetch(`${BASE}/images/edits`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${API_KEY}` },
+    body: form,
+  });
+  const raw = await response.text();
   if (!response.ok) throw new Error(`OpenAI image edit failed (${response.status}): ${raw.slice(0, 1200)}`);
   const value = JSON.parse(raw);
   const item = Array.isArray(value.data) ? value.data[0] : null;
@@ -241,7 +308,23 @@ async function runGenerate(payload) {
   }
   if (!imageB64) throw new Error("OpenAI returned no generated image data.");
 
-  return { image_b64: imageB64, mime: "image/png", usage: value.usage || null, model, quality };
+  const dimensions = pngDimensions(imageB64);
+  if (!dimensions) throw new Error("OpenAI image edit did not return a valid PNG image.");
+  if (dimensions.width !== requested.width || dimensions.height !== requested.height) {
+    throw new Error(
+      `OpenAI returned ${dimensions.width}x${dimensions.height}, but animation interpolation requires exact ${requested.width}x${requested.height} output. The frame was rejected rather than stretched.`,
+    );
+  }
+
+  return {
+    image_b64: imageB64,
+    mime: "image/png",
+    width: dimensions.width,
+    height: dimensions.height,
+    usage: value.usage || null,
+    model,
+    quality,
+  };
 }
 
 function usageCost(model, usage) {
@@ -338,7 +421,7 @@ const server = createServer(async (request, response) => {
         key_configured: Boolean(API_KEY),
         openai_schema: true,
         bridge: "openai-interrogator",
-        version: 1,
+        version: 2,
       });
       return;
     }
