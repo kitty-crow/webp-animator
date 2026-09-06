@@ -36,9 +36,6 @@ def main():
         second = load_rgba(Path(task["right"]))
         counter = 0
 
-        def generate(a, b):
-            return interpolate_pair(torch, model, a, b, 0.5)
-
         def save(image, t):
             nonlocal counter, completed
             path = output_dir / f"{task_index:04d}_{counter:04d}.png"
@@ -48,16 +45,32 @@ def main():
             print(f"PROGRESS {completed} {max(1, total_expected)}", flush=True)
             return {"path": str(path), "t": float(t)}
 
+        depth = max(0, int(task.get("depth", 1)))
         threshold = task.get("threshold")
-        frames = recursive_midpoints(
-            first,
-            second,
-            depth=max(0, int(task.get("depth", 1))),
-            threshold=None if threshold is None else float(threshold),
-            generate_midpoint=generate,
-            save_midpoint=save,
-            alpha_threshold=int(task.get("alpha_threshold", 8)),
-        )
+        if depth <= 0:
+            frames = []
+        elif threshold is None:
+            # Preserve the established Practical-RIFE path: direct arbitrary-ratio
+            # inference from the original endpoints for ordinary 2x/4x/8x jobs.
+            denominator = 2 ** depth
+            frames = []
+            for numerator in range(1, denominator):
+                t = numerator / denominator
+                frames.append(save(interpolate_pair(torch, model, first, second, t), t))
+        else:
+            def generate(a, b):
+                return interpolate_pair(torch, model, a, b, 0.5)
+
+            frames = recursive_midpoints(
+                first,
+                second,
+                depth=depth,
+                threshold=float(threshold),
+                generate_midpoint=generate,
+                save_midpoint=save,
+                alpha_threshold=int(task.get("alpha_threshold", 8)),
+            )
+
         result_tasks.append({"id": task.get("id", str(task_index)), "frames": frames})
         _release_cuda(torch)
         gc.collect()
