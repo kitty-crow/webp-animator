@@ -1,0 +1,39 @@
+      <section id="workspacePanel" class="workspace-panel">
+        <style>
+          .workspace-panel {
+            margin: 14px 0 18px;
+            padding: 14px;
+            border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+            border-radius: 14px;
+            background: color-mix(in srgb, CanvasText 2.5%, Canvas);
+          }
+          .workspace-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+          .workspace-head strong { margin-right: auto; }
+          .workspace-id { margin-top: 8px; font: 600 .78rem ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; opacity: .78; }
+          .workspace-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+          .workspace-actions input { flex: 1 1 250px; min-width: 0; padding: 9px 11px; border-radius: 9px; border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); background: Canvas; color: CanvasText; font: inherit; }
+          .workspace-actions button { width: auto; margin: 0; padding: 8px 11px; border-radius: 9px; border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); background: Canvas; color: CanvasText; font-weight: 700; }
+          .workspace-result { margin-top: 14px; padding-top: 14px; border-top: 1px solid color-mix(in srgb, CanvasText 14%, transparent); }
+          .workspace-result[hidden] { display: none; }
+          .workspace-result img { display: block; width: min(460px, 100%); max-height: 560px; object-fit: contain; margin-top: 10px; border-radius: 10px; background-image: linear-gradient(45deg, color-mix(in srgb, CanvasText 8%, Canvas) 25%, transparent 25%), linear-gradient(-45deg, color-mix(in srgb, CanvasText 8%, Canvas) 25%, transparent 25%), linear-gradient(45deg, transparent 75%, color-mix(in srgb, CanvasText 8%, Canvas) 75%), linear-gradient(-45deg, transparent 75%, color-mix(in srgb, CanvasText 8%, Canvas) 75%); background-size: 18px 18px; background-position: 0 0, 0 9px, 9px -9px, -9px 0; }
+          .workspace-result a { display: inline-block; margin-top: 10px; font-weight: 800; }
+          .workspace-note { margin-top: 8px; font-size: .78rem; opacity: .68; line-height: 1.35; }
+        </style>
+        <div class="workspace-head">
+          <strong>Recoverable job</strong>
+          <button type="button" class="small-button" id="globalCopyJob">Copy ID</button>
+          <button type="button" class="small-button" id="globalNewJob">New job</button>
+        </div>
+        <div class="workspace-id" id="globalJobId">Creating job…</div>
+        <div class="workspace-actions">
+          <input id="globalRestoreId" type="text" placeholder="Restore global job ID" aria-label="Restore global job ID">
+          <button type="button" id="globalRestore">Restore job</button>
+        </div>
+        <div class="workspace-note" id="globalJobStatus">Frames, settings and the latest finished WebP are kept with this job. A new job gets a new ID; previous IDs remain recoverable.</div>
+        <div class="workspace-result" id="globalResult" hidden>
+          <strong>Final WebP preview</strong>
+          <img id="globalResultPreview" alt="Final animated WebP preview">
+          <div class="workspace-note" id="globalResultInfo"></div>
+          <a id="globalResultDownload" download="animation.webp">Download animation.webp again</a>
+        </div>
+      </section>
