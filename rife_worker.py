@@ -158,19 +158,28 @@ def numeric_pngs(directory: Path):
 
 def main():
     args = parse_args()
-    args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    paths = numeric_pngs(args.input_dir)
+    # Practical-RIFE changes the process working directory while loading the model.
+    # Resolve every caller-supplied path first so relative Windows paths remain valid
+    # after that chdir (and for the same reason on Linux/macOS).
+    rife_dir = args.rife_dir.resolve()
+    model_dir = args.model_dir.resolve()
+    input_dir = args.input_dir.resolve()
+    output_dir = args.output_dir.resolve()
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    paths = numeric_pngs(input_dir)
     if len(paths) < 2:
         raise SystemExit("At least two aligned PNG frames are required for RIFE.")
 
-    torch, model = load_model(args.rife_dir.resolve(), args.model_dir.resolve())
+    torch, model = load_model(rife_dir, model_dir)
     total = (len(paths) - 1) * (args.multi - 1)
     completed = 0
     output_index = 0
 
     first = Image.open(paths[0]).convert("RGBA")
-    first.save(args.output_dir / f"{output_index:06d}.png")
+    first.save(output_dir / f"{output_index:06d}.png")
     output_index += 1
 
     for pair_index in range(len(paths) - 1):
@@ -180,12 +189,12 @@ def main():
         for step in range(1, args.multi):
             ratio = step / args.multi
             middle = interpolate_pair(torch, model, frame0, frame1, ratio)
-            middle.save(args.output_dir / f"{output_index:06d}.png")
+            middle.save(output_dir / f"{output_index:06d}.png")
             output_index += 1
             completed += 1
             print(f"PROGRESS {completed} {total}", flush=True)
 
-        frame1.save(args.output_dir / f"{output_index:06d}.png")
+        frame1.save(output_dir / f"{output_index:06d}.png")
         output_index += 1
 
 
