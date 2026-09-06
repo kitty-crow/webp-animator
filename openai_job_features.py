@@ -209,6 +209,37 @@ class EnhancedOpenAIJobManager(OpenAIJobManager):
             if callable(setter):
                 setter([])
 
+    def _propagate_auditor_overrides_to_parent_batches(
+        self,
+        child_job_id: str,
+        overrides: list[dict[str, Any]],
+    ) -> None:
+        """Carry learned audit preferences to later gaps in the same batch animation."""
+        if not overrides:
+            return
+        batches_root = self.root / ".openai-batches"
+        if not batches_root.is_dir():
+            return
+        for manifest in batches_root.glob("*/job.json"):
+            try:
+                batch = json.loads(manifest.read_text(encoding="utf-8"))
+                tasks = list(batch.get("tasks", []))
+                belongs = str(batch.get("current_child_id") or "") == child_job_id or any(
+                    str(task.get("child_id") or "") == child_job_id for task in tasks
+                )
+                if not belongs:
+                    continue
+                request = dict(batch.get("request", {}))
+                request["auditor_overrides"] = _merge_overrides(
+                    list(request.get("auditor_overrides", []) or []),
+                    overrides,
+                )
+                batch["request"] = request
+                batch["updated"] = time.time()
+                _atomic_manifest(manifest, batch)
+            except Exception:
+                continue
+
     def accept_latest(self, job_id: str, target_fraction: float | None = None) -> dict[str, Any]:
         """Accept the latest generated candidate, learn its audit exceptions, and continue."""
         with self._lock_for(job_id):
@@ -308,6 +339,7 @@ class EnhancedOpenAIJobManager(OpenAIJobManager):
             )
             job.get("request", {}).pop("user_feedback", None)
             self._save(job)
+            self._propagate_auditor_overrides_to_parent_batches(job_id, request["auditor_overrides"])
 
         self._start(job_id)
         return self.public(self.get(job_id) or job)
