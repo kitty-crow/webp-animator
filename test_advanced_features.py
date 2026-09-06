@@ -22,7 +22,9 @@ class AdvancedFeatureTests(unittest.TestCase):
             "reduction_threshold": "3.5",
             "smart_missing": "on",
             "missing_threshold": "14.5",
-            "target_gaps": "1,4",
+            "target_gaps": "1,4,loop",
+            "frames_to_fill": "0",
+            "loop_analysis": "alongside",
         })
         self.assertEqual(settings["geometry_mode"], "none")
         self.assertEqual(settings["interpolator"], "amt")
@@ -30,12 +32,16 @@ class AdvancedFeatureTests(unittest.TestCase):
         self.assertEqual(settings["rife_multiplier"], 4)
         self.assertTrue(settings["smart_reduction"])
         self.assertTrue(settings["smart_missing"])
-        self.assertEqual(settings["target_gaps"], "1,4")
+        self.assertEqual(settings["target_gaps"], "1,4,loop")
+        self.assertEqual(settings["frames_to_fill"], 0)
+        self.assertEqual(settings["loop_analysis"], "alongside")
 
     def test_old_persisted_rife_setting_remains_compatible(self):
         settings = app_all._settings_from_fields({"rife_multiplier": "4"})
         self.assertEqual(settings["interpolator"], "rife")
         self.assertEqual(settings["rife_multiplier"], 4)
+        self.assertNotIn("frames_to_fill", settings)
+        self.assertEqual(settings["loop_analysis"], "off")
 
     def test_target_gap_parser_accepts_display_pairs(self):
         self.assertEqual(advanced_pipeline.parse_target_gaps("1-2, 4-5"), {0, 3})
