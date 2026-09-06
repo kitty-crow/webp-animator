@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import json
 from pathlib import Path
 
@@ -25,6 +26,42 @@ def write_result(path: Path, value: dict) -> None:
 def load_rgba(path: Path) -> Image.Image:
     with Image.open(path) as image:
         return image.convert("RGBA").copy()
+
+
+def release_cuda(torch) -> None:
+    """Drop Python garbage and return unused CUDA allocations to the allocator."""
+    gc.collect()
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+def is_cuda_oom(torch, exc: BaseException) -> bool:
+    """Recognise CUDA OOMs across PyTorch versions without naming a missing class.
+
+    Older PyTorch builds expose the exception as torch.cuda.OutOfMemoryError while
+    newer builds may also expose torch.OutOfMemoryError. Referring directly to a
+    missing top-level class inside an ``except`` clause raises AttributeError and
+    masks the real CUDA OOM, so workers use this predicate instead.
+    """
+    classes = []
+    for owner in (torch, getattr(torch, "cuda", None)):
+        if owner is None:
+            continue
+        cls = getattr(owner, "OutOfMemoryError", None)
+        if isinstance(cls, type) and issubclass(cls, BaseException):
+            classes.append(cls)
+    if classes and isinstance(exc, tuple(dict.fromkeys(classes))):
+        return True
+
+    if isinstance(exc, RuntimeError):
+        text = str(exc).lower()
+        return "out of memory" in text and (
+            "cuda" in text or "cudnn" in text or "gpu" in text
+        )
+    return False
 
 
 def content_bbox(first: Image.Image, second: Image.Image, margin: int = CONTENT_MARGIN):
