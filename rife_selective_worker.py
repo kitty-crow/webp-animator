@@ -23,7 +23,25 @@ def parse_args():
     return parser.parse_args()
 
 
+def _ratios(task: dict) -> list[float]:
+    raw = task.get("ratios")
+    if not isinstance(raw, list):
+        return []
+    values = []
+    for value in raw:
+        try:
+            ratio = float(value)
+        except (TypeError, ValueError):
+            continue
+        if 0.0 < ratio < 1.0:
+            values.append(ratio)
+    return sorted(set(values))
+
+
 def _expected(task: dict) -> int:
+    ratios = _ratios(task)
+    if ratios:
+        return len(ratios)
     if "count" in task:
         count = max(0, int(task.get("count", 0)))
         return count if count > 0 else max(1, int(task.get("max_frames", 31)))
@@ -59,7 +77,14 @@ def main():
             return {"path": str(path), "t": float(t)}
 
         diagnostics = {}
-        if "count" in task:
+        ratios = _ratios(task)
+        if ratios:
+            frames = [
+                save(interpolate_pair(torch, model, first, second, t), t)
+                for t in ratios
+            ]
+            diagnostics = {"satisfied": True, "limit_reached": False}
+        elif "count" in task:
             count = max(0, int(task.get("count", 0)))
             if count > 0:
                 # Practical-RIFE supports arbitrary temporal ratios directly, so
