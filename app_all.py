@@ -3,12 +3,16 @@ from __future__ import annotations
 
 import json
 import shutil
+import tempfile
 import threading
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import app as legacy
+import advanced_pipeline
+import gpu_match
+from engine_paths import engine_status
 from frame1_optimizer import find_best_scale_and_translation as fast_find_best_scale_and_translation
 from global_jobs import GlobalJobStore
 
@@ -16,6 +20,7 @@ ROOT = Path(__file__).resolve().parent
 GLOBAL = GlobalJobStore(ROOT)
 WORKSPACE_FRAGMENT = (ROOT / "workspace_ui" / "fragment.html").read_text(encoding="utf-8")
 WORKSPACE_SCRIPT = (ROOT / "workspace_ui" / "workspace.js").read_bytes()
+ADVANCED_SCRIPT = (ROOT / "advanced_ui.js").read_bytes()
 
 MIME_BY_SUFFIX = {
     ".png": "image/png",
@@ -36,7 +41,7 @@ def enhanced_index() -> bytes:
     html = html.replace(marker, WORKSPACE_FRAGMENT + "\n\n" + marker, 1)
     html = html.replace(
         "</body>",
-        '  <script src="/workspace-ui.js"></script>\n</body>',
+        '  <script src="/workspace-ui.js"></script>\n  <script src="/advanced-ui.js"></script>\n</body>',
         1,
     )
     return html.encode("utf-8")
@@ -47,9 +52,7 @@ INDEX_HTML = enhanced_index()
 _original_get_job = legacy.get_job
 _original_set_job = legacy.set_job
 
-# The legacy frame-1 matcher performed full-resolution translation refinement for
-# every scale candidate, which is catastrophically slow on 2K/3K frames. Keep
-# the public/legacy API but replace that one implementation in the persistent app.
+# Keep the fast bounded CPU frame-1 optimiser as the fallback implementation.
 legacy.find_best_scale_and_translation = fast_find_best_scale_and_translation
 
 
@@ -76,6 +79,22 @@ legacy.get_job = _persistent_get_job
 legacy.set_job = _persistent_set_job
 legacy.clean_old_jobs = lambda: None
 
+# Patch the existing geometry entry points only when CUDA PyTorch is available.
+# Every GPU wrapper falls straight back to the established CPU implementation on
+# any CUDA/OOM failure, so acceleration never becomes a hard runtime dependency.
+GPU_GEOMETRY = False
+try:
+    GPU_GEOMETRY = gpu_match.install(legacy)
+except Exception:
+    GPU_GEOMETRY = False
+
+
+def _advanced_process_job(job_id: str, paths: list[Path], settings: dict):
+    return advanced_pipeline.process_job(legacy, job_id, paths, settings)
+
+
+legacy.process_job = _advanced_process_job
+
 
 def _settings_from_fields(fields: dict[str, str]) -> dict:
     axis = fields.get("axis", "xy")
@@ -87,10 +106,19 @@ def _settings_from_fields(fields: dict[str, str]) -> dict:
         rife_multiplier = 1
 
     geometry_mode = fields.get("geometry_mode", "sequential")
-    if geometry_mode not in {"sequential", "fit_previous", "fix_first"}:
+    if geometry_mode not in {"none", "sequential", "fit_previous", "fix_first"}:
         geometry_mode = "sequential"
     if fields.get("shrink_larger") == "on" and geometry_mode == "sequential":
         geometry_mode = "fit_previous"
+
+    interpolator = str(fields.get("interpolator", "")).strip().lower()
+    if interpolator not in {"none", "rife", "amt"}:
+        # Backward compatibility for persisted jobs created before the selector existed.
+        interpolator = "rife" if rife_multiplier > 1 else "none"
+
+    frame_generator = str(fields.get("frame_generator", "none")).strip().lower()
+    if frame_generator not in {"none", "eden", "speed"}:
+        frame_generator = "none"
 
     return {
         "axis": axis,
@@ -102,6 +130,13 @@ def _settings_from_fields(fields: dict[str, str]) -> dict:
         "lossy": fields.get("lossy") == "on",
         "geometry_mode": geometry_mode,
         "rife_multiplier": rife_multiplier,
+        "interpolator": interpolator,
+        "frame_generator": frame_generator,
+        "smart_reduction": fields.get("smart_reduction") == "on",
+        "reduction_threshold": legacy.clamp_float(fields.get("reduction_threshold"), 2.0, 0.0, 100.0),
+        "smart_missing": fields.get("smart_missing") == "on",
+        "missing_threshold": legacy.clamp_float(fields.get("missing_threshold"), 12.0, 0.0, 100.0),
+        "target_gaps": str(fields.get("target_gaps", "")).strip(),
     }
 
 
@@ -109,6 +144,7 @@ def _run_global_render(job_id: str, paths: list[Path], settings: dict) -> None:
     job_dir = GLOBAL.job_dir(job_id)
     shutil.rmtree(job_dir / "aligned", ignore_errors=True)
     shutil.rmtree(job_dir / "interpolated", ignore_errors=True)
+    shutil.rmtree(job_dir / "advanced", ignore_errors=True)
     try:
         (job_dir / "animation.webp").unlink(missing_ok=True)
     except OSError:
@@ -151,7 +187,7 @@ def _resume_interrupted_jobs() -> None:
 
 
 class Handler(legacy.Handler):
-    server_version = "AnimAlignWebP/5.0-persistent"
+    server_version = "AnimAlignWebP/6.0-multiengine"
 
     def read_json_body(self, max_bytes: int = 1024 * 1024) -> dict:
         try:
@@ -182,6 +218,14 @@ class Handler(legacy.Handler):
 
         if path == "/workspace-ui.js":
             self.send_bytes(200, WORKSPACE_SCRIPT, "text/javascript; charset=utf-8")
+            return
+
+        if path == "/advanced-ui.js":
+            self.send_bytes(200, ADVANCED_SCRIPT, "text/javascript; charset=utf-8")
+            return
+
+        if path == "/engine-status":
+            self.send_json(200, engine_status(legacy))
             return
 
         if path == "/job":
@@ -247,6 +291,21 @@ class Handler(legacy.Handler):
 
         super().do_GET()
 
+    def _parse_frame_upload(self):
+        content_type, body = self.read_upload_body()
+        fields, uploads_raw = legacy.parse_multipart(content_type, body)
+        selected = [
+            (filename, payload)
+            for field, filename, payload in uploads_raw
+            if field == "frames" and filename
+        ]
+        if not selected:
+            raise ValueError("No frames were uploaded.")
+        for filename, _ in selected:
+            if Path(filename).suffix.lower() not in legacy.ALLOWED_EXTENSIONS:
+                raise ValueError(f"Unsupported image type: {filename}")
+        return fields, selected
+
     def do_POST(self):
         path = urlparse(self.path).path
 
@@ -262,21 +321,29 @@ class Handler(legacy.Handler):
                 self.send_json(400, {"error": str(exc)})
             return
 
+        if path == "/analyse":
+            try:
+                fields, selected = self._parse_frame_upload()
+                settings = _settings_from_fields(fields)
+                with tempfile.TemporaryDirectory(prefix="webp_analyse_") as temporary:
+                    root = Path(temporary)
+                    paths = []
+                    for index, (filename, payload) in enumerate(selected):
+                        suffix = Path(filename).suffix.lower()
+                        frame_path = root / f"{index:06d}{suffix}"
+                        frame_path.write_bytes(payload)
+                        paths.append(frame_path)
+                    result = advanced_pipeline.analyse_paths(legacy, paths, settings)
+                self.send_json(200, result)
+            except OverflowError as exc:
+                self.send_text(413, str(exc))
+            except Exception as exc:
+                self.send_text(400, str(exc))
+            return
+
         if path == "/generate":
             try:
-                content_type, body = self.read_upload_body()
-                fields, uploads_raw = legacy.parse_multipart(content_type, body)
-                selected = [
-                    (filename, payload)
-                    for field, filename, payload in uploads_raw
-                    if field == "frames" and filename
-                ]
-                if not selected:
-                    raise ValueError("No frames were uploaded.")
-                for filename, _ in selected:
-                    if Path(filename).suffix.lower() not in legacy.ALLOWED_EXTENSIONS:
-                        raise ValueError(f"Unsupported image type: {filename}")
-
+                fields, selected = self._parse_frame_upload()
                 requested = str(fields.get("global_job_id", "")).strip().lower()
                 job_id = requested or GLOBAL.new_id()
                 settings = _settings_from_fields(fields)
@@ -294,12 +361,14 @@ class Handler(legacy.Handler):
 
 def main():
     _resume_interrupted_jobs()
-    ready, _, _, _ = legacy.rife_paths()
+    statuses = engine_status(legacy)
     server = ThreadingHTTPServer((legacy.HOST, legacy.PORT), Handler)
     print(f"WebP Animator persistent server listening on http://{legacy.HOST}:{legacy.PORT}")
     print(f"Local access: http://127.0.0.1:{legacy.PORT}")
     print(f"LAN access:   http://<this-machine-LAN-IP>:{legacy.PORT}")
-    print(f"RIFE:         {'ready' if ready else 'not installed'}")
+    print(f"GPU matching: {'ready' if GPU_GEOMETRY else 'CPU fallback'}")
+    for name in ("rife", "amt", "eden", "speed"):
+        print(f"{name.upper():<12} {'ready' if statuses.get(name, {}).get('ready') else 'not installed'}")
     print("Global jobs:  durable with no automatic expiry")
     print("Press Ctrl+C to stop.")
     try:
