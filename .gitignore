@@ -7,4 +7,5 @@ third_party/
 .DS_Store
 .env
 .openai-jobs/
+.openai-batches/
 openai_bridge/node_modules/
