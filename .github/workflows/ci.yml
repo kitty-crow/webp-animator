@@ -34,17 +34,18 @@ jobs:
 
       - name: Check Python syntax and enhanced app import
         run: |
-          python -m py_compile app.py app_openai.py openai_interrogator.py openai_batch.py anim_align_webp.py rife_worker.py setup_openai.py setup_rife.py
+          python -m py_compile app.py app_openai.py openai_interrogator.py openai_batch.py openai_job_features.py anim_align_webp.py rife_worker.py setup_openai.py setup_rife.py
           python - <<'PY'
           import app_openai
           assert b"OpenAI Interrogator" in app_openai.INDEX_HTML
+          assert b"Ignore auditor and continue" in app_openai.INDEX_HTML
           status = app_openai.OPENAI.bridge.status()
           assert "key_configured" in status
           assert "schema_built" in status
           PY
 
       - name: Test OpenAI job orchestration
-        run: python -m unittest -v test_openai_interrogator.py test_openai_batch.py
+        run: python -m unittest -v test_openai_interrogator.py test_openai_batch.py test_openai_job_features.py
 
       - name: Check browser and bridge JavaScript syntax
         run: |
