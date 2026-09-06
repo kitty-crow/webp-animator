@@ -94,9 +94,7 @@ def make_interpolator(torch, device, model):
         t0 = _tensor(torch, crop0, device)
         t1 = _tensor(torch, crop1, device)
         rgb_t = _infer_with_fallback(torch, model, t0, t1)
-        rgb = (
-            rgb_t[0].mul(255).byte().cpu().numpy().transpose(1, 2, 0)
-        )
+        rgb = rgb_t[0].mul(255).byte().cpu().numpy().transpose(1, 2, 0)
 
         a0 = np.asarray(crop0.getchannel("A"), dtype=np.uint8)
         a1 = np.asarray(crop1.getchannel("A"), dtype=np.uint8)
@@ -137,17 +135,17 @@ def main():
         second = load_rgba(Path(task["right"]))
         counter = 0
 
-        def save(image):
+        def save(image, t):
             nonlocal counter, completed
             path = output_dir / f"{task_index:04d}_{counter:04d}.png"
             counter += 1
             image.save(path)
             completed += 1
             print(f"PROGRESS {completed} {max(1, total_expected)}", flush=True)
-            return str(path)
+            return {"path": str(path), "t": float(t)}
 
         threshold = task.get("threshold")
-        paths = recursive_midpoints(
+        frames = recursive_midpoints(
             first,
             second,
             depth=max(0, int(task.get("depth", 1))),
@@ -156,7 +154,7 @@ def main():
             save_midpoint=save,
             alpha_threshold=int(task.get("alpha_threshold", 8)),
         )
-        result_tasks.append({"id": task.get("id", str(task_index)), "frames": paths})
+        result_tasks.append({"id": task.get("id", str(task_index)), "frames": frames})
         if device.type == "cuda":
             torch.cuda.empty_cache()
         gc.collect()
