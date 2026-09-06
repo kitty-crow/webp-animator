@@ -7,7 +7,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import app as legacy
-from openai_interrogator import OpenAIJobManager
+from openai_interrogator import ACTIVE_STATES, OpenAIJobManager
 
 ROOT = Path(__file__).resolve().parent
 OPENAI = OpenAIJobManager(ROOT)
@@ -26,6 +26,89 @@ def enhanced_index() -> bytes:
 
 
 INDEX_HTML = enhanced_index()
+
+
+def _fraction_key(value: float) -> str:
+    return f"{value:.9f}".rstrip("0").rstrip(".")
+
+
+def attempt_path(job_id: str, fraction: float, attempt_number: int) -> Path | None:
+    job = OPENAI.get(job_id)
+    if not job:
+        return None
+    key = _fraction_key(fraction)
+    for item in job.get("attempts", []):
+        if (
+            _fraction_key(float(item.get("target_fraction", -1))) == key
+            and int(item.get("attempt", -1)) == attempt_number
+        ):
+            path = OPENAI._job_dir(job_id) / str(item.get("candidate_path", ""))
+            return path if path.is_file() else None
+    return None
+
+
+def reopen_for_retry(
+    job_id: str,
+    feedback: str,
+    max_spend_usd: float | None,
+    target_fraction: float | None,
+) -> dict:
+    with OPENAI._lock_for(job_id):
+        job = OPENAI.get(job_id)
+        if not job:
+            raise KeyError(job_id)
+        if job.get("status") in ACTIVE_STATES:
+            return OPENAI.public(job)
+
+        attempts = list(job.get("attempts", []))
+        if target_fraction is None:
+            pending = job.get("pending_target")
+            if pending is not None:
+                target_fraction = float(pending)
+            elif attempts:
+                target_fraction = float(attempts[-1].get("target_fraction", 0.5))
+            else:
+                raise ValueError("This job has no generated attempt to retry.")
+
+        key = _fraction_key(float(target_fraction))
+        matching = [
+            item for item in attempts
+            if _fraction_key(float(item.get("target_fraction", -1))) == key
+        ]
+        if not matching:
+            raise ValueError("That target has no previous attempt to learn from.")
+
+        latest = matching[-1]
+        latest["user_rejected"] = True
+        latest["user_feedback"] = feedback.strip()
+
+        request = dict(job.get("request", {}))
+        if feedback.strip():
+            request["user_feedback"] = feedback.strip()
+        if max_spend_usd is not None:
+            request["max_spend_usd"] = max(0.0, float(max_spend_usd))
+        job["request"] = request
+
+        job["accepted"] = [
+            item for item in job.get("accepted", [])
+            if _fraction_key(float(item.get("target_fraction", -1))) != key
+        ]
+        remaining = [
+            float(value) for value in job.get("targets_remaining", [])
+            if _fraction_key(float(value)) != key
+        ]
+        job["targets_remaining"] = [float(target_fraction), *remaining]
+        if isinstance(job.get("preplans"), dict):
+            job["preplans"].pop(key, None)
+        job["pending_target"] = float(target_fraction)
+        job["status"] = "queued"
+        job["stage"] = "queued"
+        job["error"] = None
+        job["message"] = "Retry queued with the previous generated image, audit and user feedback as evidence"
+        OPENAI._save(job)
+
+    OPENAI._start(job_id)
+    return OPENAI.public(job)
 
 
 class Handler(legacy.Handler):
@@ -91,6 +174,26 @@ class Handler(legacy.Handler):
             )
             return
 
+        if path == "/openai/attempt":
+            job_id = query.get("id", [""])[0]
+            try:
+                fraction = float(query.get("fraction", [""])[0])
+                attempt_number = int(query.get("attempt", [""])[0])
+            except ValueError:
+                self.send_text(400, "Invalid attempt selector.")
+                return
+            result = attempt_path(job_id, fraction, attempt_number)
+            if not result:
+                self.send_text(404, "OpenAI attempt image not found.")
+                return
+            self.send_bytes(
+                200,
+                result.read_bytes(),
+                "image/png",
+                {"Content-Disposition": f'inline; filename="openai-attempt-{attempt_number}.png"'},
+            )
+            return
+
         super().do_GET()
 
     def do_POST(self):
@@ -132,7 +235,13 @@ class Handler(legacy.Handler):
                 job_id = str(payload.get("job_id", ""))
                 feedback = str(payload.get("feedback", ""))
                 max_spend = payload.get("max_spend_usd")
-                result = OPENAI.resume(job_id, feedback, None if max_spend is None else float(max_spend))
+                target = payload.get("target_fraction")
+                result = reopen_for_retry(
+                    job_id,
+                    feedback,
+                    None if max_spend is None else float(max_spend),
+                    None if target is None else float(target),
+                )
                 self.send_json(202, result)
             except KeyError:
                 self.send_json(404, {"error": "Unknown OpenAI interpolation job."})
@@ -151,6 +260,9 @@ class Handler(legacy.Handler):
             return
 
         super().do_POST()
+
+    def log_message(self, fmt, *args):
+        super().log_message(fmt, *args)
 
 
 def main():
