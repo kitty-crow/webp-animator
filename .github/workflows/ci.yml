@@ -34,7 +34,7 @@ jobs:
 
       - name: Check Python syntax and enhanced app import
         run: |
-          python -m py_compile app.py app_openai.py openai_interrogator.py anim_align_webp.py rife_worker.py setup_openai.py setup_rife.py
+          python -m py_compile app.py app_openai.py openai_interrogator.py openai_batch.py anim_align_webp.py rife_worker.py setup_openai.py setup_rife.py
           python - <<'PY'
           import app_openai
           assert b"OpenAI Interrogator" in app_openai.INDEX_HTML
@@ -42,6 +42,9 @@ jobs:
           assert "key_configured" in status
           assert "schema_built" in status
           PY
+
+      - name: Test OpenAI job orchestration
+        run: python -m unittest -v test_openai_interrogator.py test_openai_batch.py
 
       - name: Check bridge syntax
         run: node --check openai_bridge/server.mjs
@@ -63,10 +66,11 @@ jobs:
               health = json.load(f)
           assert health['ok'] is True
           assert health['key_configured'] is False
+          assert health['version'] >= 3
           PY
           curl -fsS -X POST http://127.0.0.1:18745/estimate \
             -H 'content-type: application/json' \
-            -d '{"planner_model":"gpt-5.6-luna","auditor_model":"gpt-5.6-luna","image_quality":"medium","width":1024,"height":1536,"reference_count":2,"context_count":1,"attempts":1}' \
+            -d '{"planner_model":"gpt-5.6-luna","auditor_model":"gpt-5.6-luna","image_quality":"medium","width":2120,"height":2736,"reference_count":2,"context_count":1,"attempts":1}' \
             >/tmp/estimate.json
           python - <<'PY'
           import json
