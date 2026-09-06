@@ -40,10 +40,14 @@ def main():
         "torchdiffeq>=0.2.4",
         "lpips==0.1.4",
         "opencv-python-headless>=4.5",
+        "cupy-cuda11x>=13,<14",
     ])
-    # xFormers is an acceleration, not a correctness dependency. Some Windows /
-    # Pascal combinations do not have a compatible wheel, and the worker falls
-    # back to ordinary PyTorch attention cleanly in that case.
+    # EDEN's src.utils imports FloLPIPS at module import time, and its correlation
+    # kernel imports CuPy even though the interpolation worker does not calculate
+    # that metric. Keeping CuPy here avoids an upstream import-time failure.
+    # xFormers is an acceleration rather than a correctness dependency. Some
+    # Windows/Pascal combinations do not have a compatible wheel, and the worker
+    # falls back to ordinary PyTorch attention cleanly in that case.
     completed = subprocess.run([
         str(python),
         "-m",
