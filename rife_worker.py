@@ -2,12 +2,19 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import os
 import sys
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
+
+# Reduce CUDA allocator fragmentation when supported. This must be set before
+# Practical-RIFE imports torch. Callers can still override it explicitly.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+RIFE_SCALES = (1.0, 0.5, 0.25)
 
 
 def parse_args():
@@ -71,26 +78,34 @@ def load_model(rife_dir: Path, model_dir: Path):
     return torch, model
 
 
-def tensor_from_rgb(torch, image: Image.Image, device):
+def _padding_multiple(scale: float) -> int:
+    # Match Practical-RIFE's own inference_video.py padding rule. Lower internal
+    # scales need a larger input multiple so every IFNet stage remains aligned.
+    return max(128, int(128 / scale))
+
+
+def tensor_from_rgb(torch, image: Image.Image, device, scale: float):
     from torch.nn import functional as F
 
     array = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
     tensor = torch.from_numpy(array.transpose(2, 0, 1)).unsqueeze(0).to(device)
     h, w = array.shape[:2]
-    ph = ((h - 1) // 64 + 1) * 64
-    pw = ((w - 1) // 64 + 1) * 64
+    multiple = _padding_multiple(scale)
+    ph = ((h - 1) // multiple + 1) * multiple
+    pw = ((w - 1) // multiple + 1) * multiple
     return F.pad(tensor, (0, pw - w, 0, ph - h)), h, w
 
 
-def tensor_from_alpha(torch, image: Image.Image, device):
+def tensor_from_alpha(torch, image: Image.Image, device, scale: float):
     from torch.nn import functional as F
 
     alpha = np.asarray(image.getchannel("A"), dtype=np.float32) / 255.0
     array = np.repeat(alpha[..., None], 3, axis=2)
     tensor = torch.from_numpy(array.transpose(2, 0, 1)).unsqueeze(0).to(device)
     h, w = alpha.shape
-    ph = ((h - 1) // 64 + 1) * 64
-    pw = ((w - 1) // 64 + 1) * 64
+    multiple = _padding_multiple(scale)
+    ph = ((h - 1) // multiple + 1) * multiple
+    pw = ((w - 1) // multiple + 1) * multiple
     return F.pad(tensor, (0, pw - w, 0, ph - h)), h, w
 
 
@@ -119,34 +134,90 @@ def alpha_from_tensor(tensor, h: int, w: int):
     return array
 
 
-def interpolate_pair(torch, model, first: Image.Image, second: Image.Image, ratio: float):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def _clear_cuda_after_oom(torch):
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
+
+def _infer_with_scale_fallback(
+    torch,
+    model,
+    first: Image.Image,
+    second: Image.Image,
+    ratio: float,
+    *,
+    alpha: bool,
+):
+    """Run one RIFE inference, reducing internal scale only after CUDA OOM."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    make_tensor = tensor_from_alpha if alpha else tensor_from_rgb
+    convert = alpha_from_tensor if alpha else rgb_from_tensor
+    last_error = None
+
+    # CPU does not need a VRAM fallback. Keep full internal resolution there.
+    scales = RIFE_SCALES if device.type == "cuda" else (1.0,)
+
+    for index, scale in enumerate(scales):
+        first_tensor = None
+        second_tensor = None
+        middle = None
+        try:
+            first_tensor, h, w = make_tensor(torch, first, device, scale)
+            second_tensor, _, _ = make_tensor(torch, second, device, scale)
+            with torch.inference_mode():
+                middle = model.inference(first_tensor, second_tensor, ratio, scale)
+            result = convert(middle, h, w)
+            return result, scale
+        except torch.OutOfMemoryError as exc:
+            last_error = exc
+            # Drop every tensor from the failed attempt before asking the CUDA
+            # allocator for a smaller inference. PyTorch's model stays resident.
+            del middle, second_tensor, first_tensor
+            _clear_cuda_after_oom(torch)
+            if index + 1 < len(scales):
+                next_scale = scales[index + 1]
+                channel = "alpha" if alpha else "RGB"
+                print(
+                    f"RIFE CUDA OOM for {channel} at scale={scale:g}; "
+                    f"retrying at scale={next_scale:g}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("RIFE inference failed without an error.")
+
+
+def interpolate_pair(torch, model, first: Image.Image, second: Image.Image, ratio: float):
     first = first.convert("RGBA")
     second = second.convert("RGBA")
     if first.size != second.size:
         raise ValueError("RIFE input frames must have the same canvas size.")
 
-    first_rgb, h, w = tensor_from_rgb(torch, first, device)
-    second_rgb, _, _ = tensor_from_rgb(torch, second, device)
-
-    with torch.inference_mode():
-        middle_rgb = model.inference(first_rgb, second_rgb, ratio)
-
-    rgb = rgb_from_tensor(middle_rgb, h, w)
+    rgb, rgb_scale = _infer_with_scale_fallback(
+        torch, model, first, second, ratio, alpha=False
+    )
 
     first_alpha = np.asarray(first.getchannel("A"))
     second_alpha = np.asarray(second.getchannel("A"))
     opaque = np.all(first_alpha == 255) and np.all(second_alpha == 255)
 
     if opaque:
-        alpha = np.full((h, w), 255, dtype=np.uint8)
+        alpha = np.full((first.height, first.width), 255, dtype=np.uint8)
+        alpha_scale = rgb_scale
     else:
-        alpha0, _, _ = tensor_from_alpha(torch, first, device)
-        alpha1, _, _ = tensor_from_alpha(torch, second, device)
-        with torch.inference_mode():
-            middle_alpha = model.inference(alpha0, alpha1, ratio)
-        alpha = alpha_from_tensor(middle_alpha, h, w)
+        alpha, alpha_scale = _infer_with_scale_fallback(
+            torch, model, first, second, ratio, alpha=True
+        )
+
+    if rgb_scale != 1.0 or alpha_scale != 1.0:
+        print(
+            f"RIFE_SCALE rgb={rgb_scale:g} alpha={alpha_scale:g}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     rgba = np.dstack((rgb, alpha))
     return Image.fromarray(rgba, "RGBA")
