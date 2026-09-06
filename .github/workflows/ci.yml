@@ -20,7 +20,7 @@ jobs:
 
       - name: Check Python syntax and persistent app import
         run: |
-          python -m py_compile app.py app_all.py global_jobs.py anim_align_webp.py rife_worker.py setup_rife.py
+          python -m py_compile app.py app_all.py global_jobs.py anim_align_webp.py frame1_optimizer.py rife_worker.py setup_rife.py
           python - <<'PY'
           import app_all
           assert b"Recoverable job" in app_all.INDEX_HTML
@@ -28,8 +28,8 @@ jobs:
           assert b"workspace-ui.js" in app_all.INDEX_HTML
           PY
 
-      - name: Test durable jobs
-        run: python -m unittest -v test_global_jobs.py
+      - name: Test durable jobs and frame-1 optimiser
+        run: python -m unittest -v test_global_jobs.py test_frame1_optimizer.py
 
       - name: Ensure retired semantic interpolator is gone
         shell: bash
