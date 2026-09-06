@@ -22,6 +22,8 @@
   const maxFrames = $("oiMaxFrames");
   const benefitWrap = $("oiBenefitWrap");
   const minBenefit = $("oiMinBenefit");
+  const retryPolicy = $("oiRetryPolicy");
+  const retriesWrap = $("oiRetriesWrap");
   const retries = $("oiRetries");
   const maxSpend = $("oiMaxSpend");
   const wholeContext = $("oiWholeContext");
@@ -40,11 +42,12 @@
   const reviewBox = $("oiReview");
   const feedback = $("oiFeedback");
   const retryButton = $("oiRetry");
+  const acceptAnywayButton = $("oiAcceptAnyway");
   const restoreId = $("oiRestoreId");
   const restoreButton = $("oiRestore");
 
-  const JOBS_KEY = "webp-animator-openai-jobs-v2";
-  const ACTIVE_KEY = "webp-animator-openai-active-v2";
+  const JOBS_KEY = "webp-animator-openai-jobs-v3";
+  const ACTIVE_KEY = "webp-animator-openai-active-v3";
   const STOPPED = new Set(["done", "error", "needs_review", "budget_wait", "interrupted", "cancelled"]);
   let openaiReady = false;
   let currentJob = null;
@@ -187,6 +190,11 @@
     scheduleEstimate();
   }
 
+  function applyRetryPolicy() {
+    retriesWrap.hidden = retryPolicy.value === "auto_budget";
+    scheduleEstimate();
+  }
+
   function requestSettings() {
     const list = currentFrames();
     const selectedScope = scope.value;
@@ -202,6 +210,7 @@
       count: Math.max(1, Number(count.value || 1)),
       max_frames: Math.max(1, Number(maxFrames.value || 1)),
       min_benefit_score: Math.max(0, Math.min(100, Number(minBenefit.value || 0))),
+      retry_policy: retryPolicy.value,
       auto_retries: Math.max(0, Number(retries.value || 0)),
       max_spend_usd: Math.max(0, Number(maxSpend.value || 0)),
       whole_sequence_context: wholeContext.checked,
@@ -244,14 +253,19 @@
       const maximum = Number(estimate.maximum || 0);
       const framesExpected = Number(estimate.frames || 1);
       const segments = Number(estimate.segments || 1);
+      const budgetDriven = Boolean(estimate.budget_driven);
+      const retryLine = budgetDriven
+        ? `Retry handling: automatic until accepted or the $${maximum.toFixed(2)} whole-job budget is exhausted (hard safety ceiling: 32 attempts for one target)`
+        : `Configured generation: up to ${framesExpected} generated frame${framesExpected === 1 ? "" : "s"} total · up to ${estimate.attempts_per_frame || 1} attempt${Number(estimate.attempts_per_frame || 1) === 1 ? "" : "s"}/frame`;
       costBox.textContent = [
         `Estimated paid attempt: ~$${one.toFixed(4)} per generated-frame attempt`,
         `Selected gaps: ${segments}`,
-        `Configured generation: up to ${framesExpected} generated frame${framesExpected === 1 ? "" : "s"} total · up to ${estimate.attempts_per_frame || 1} attempt${Number(estimate.attempts_per_frame || 1) === 1 ? "" : "s"}/frame`,
-        `Estimated worst case for this configuration: ~$${maximum.toFixed(4)}`,
+        budgetDriven ? `Configured generation: up to ${framesExpected} generated frame${framesExpected === 1 ? "" : "s"} total` : "",
+        retryLine,
+        budgetDriven ? `Maximum configured OpenAI spend: $${maximum.toFixed(2)}` : `Estimated worst case for this configuration: ~$${maximum.toFixed(4)}`,
         wholeContext.checked ? "Full-animation context is enabled." : "Only the immediate gap context is enabled.",
         "The estimate is approximate; actual API usage is recorded after each completed attempt.",
-      ].join("\n");
+      ].filter(Boolean).join("\n");
     } catch (error) {
       costBox.textContent = `Could not estimate cost: ${error.message}`;
     }
@@ -304,9 +318,11 @@
     });
   }
 
-  function formatAudit(audit) {
+  function formatAudit(audit, attempt = null) {
     if (!audit) return "";
-    const state = audit.acceptable ? "ACCEPTED" : "REJECTED";
+    const state = attempt?.accepted_by_user
+      ? "ACCEPTED BY USER OVERRIDE (auditor rejected)"
+      : (audit.acceptable ? "ACCEPTED" : "REJECTED");
     const issues = Array.isArray(audit.violations) && audit.violations.length
       ? audit.violations.map(item => `• ${item.description || item.type}`).join("\n")
       : "• no material violations reported";
@@ -321,6 +337,35 @@
   function attemptUrl(job, attempt) {
     const owner = attempt.job_id || job.id;
     return `/openai/attempt?id=${encodeURIComponent(owner)}&fraction=${encodeURIComponent(attempt.target_fraction)}&attempt=${encodeURIComponent(attempt.attempt)}`;
+  }
+
+  async function restoreSourceAnimation(job, force = false) {
+    const count = Number(job.source_count || 0);
+    if (count <= 0) throw new Error("This saved job does not expose any recoverable source frames.");
+    const list = currentFrames();
+    if (list.length && !force) return false;
+
+    const names = Array.isArray(job.source_names) ? job.source_names : [];
+    const restored = [];
+    for (let index = 0; index < count; index += 1) {
+      const response = await fetch(`/openai/source?id=${encodeURIComponent(job.id)}&index=${index}`, { cache: "no-store" });
+      if (!response.ok) throw new Error(await response.text());
+      const blob = await response.blob();
+      const name = names[index] || `restored-frame-${index + 1}.png`;
+      const file = new File([blob], name, { type: blob.type || "image/png" });
+      restored.push(makeFrameItem(file, name));
+    }
+
+    if (force) {
+      for (const item of list) {
+        try { if (item?.url?.startsWith?.("blob:")) URL.revokeObjectURL(item.url); } catch {}
+      }
+    }
+    list.splice(0, list.length, ...restored);
+    renderFrames();
+    updateFrameOptions();
+    statusBox.textContent = `Restored ${restored.length} source frame${restored.length === 1 ? "" : "s"} from OpenAI job ${job.id}.`;
+    return true;
   }
 
   function renderJob(job) {
@@ -350,7 +395,7 @@
         "",
         `Latest attempt${segmentText}: target t=${Number(latest.target_fraction).toFixed(3)} · attempt ${latest.attempt}`,
         `Attempt cost: $${Number(latest.actual_cost_usd || latest.estimated_cost_usd || 0).toFixed(4)}`,
-        formatAudit(latest.audit),
+        formatAudit(latest.audit, latest),
       );
     }
 
@@ -383,6 +428,16 @@
     });
     actions.appendChild(copy);
 
+    if (Number(job.source_count || 0) > 0) {
+      const restoreSource = document.createElement("button");
+      restoreSource.type = "button";
+      restoreSource.textContent = currentFrames().length ? "Replace current frames with job source animation" : "Restore job source animation";
+      restoreSource.addEventListener("click", () => restoreSourceAnimation(job, true).catch(error => {
+        statusBox.textContent = `Could not restore source animation: ${error.message}`;
+      }));
+      actions.appendChild(restoreSource);
+    }
+
     if (job.status === "done" && accepted.length) {
       const insert = document.createElement("button");
       insert.type = "button";
@@ -397,12 +452,17 @@
     const resumable = ["needs_review", "budget_wait", "interrupted", "error"].includes(job.status);
     const canRejectAccepted = job.status === "done" && latest?.audit?.acceptable;
     reviewBox.hidden = !(resumable || canRejectAccepted);
+    acceptAnywayButton.hidden = !(job.status === "needs_review" && latest && !latest.accepted_by_user);
     if (!reviewBox.hidden) {
       if (job.status === "interrupted") retryButton.textContent = "Resume job";
       else if (job.status === "budget_wait") retryButton.textContent = "Resume with current spend limit";
       else if (job.status === "error") retryButton.textContent = "Retry failed step without re-uploading";
       else if (canRejectAccepted) retryButton.textContent = "Reject this result, add feedback and try again";
       else retryButton.textContent = "Learn from this attempt and try again";
+    }
+    if (job.request?.retry_policy && ["manual", "auto_budget"].includes(job.request.retry_policy)) {
+      retryPolicy.value = job.request.retry_policy;
+      applyRetryPolicy();
     }
     if (STOPPED.has(job.status)) clearActive(job.id);
   }
@@ -479,6 +539,9 @@
       throw new Error("The first frame in a range must come before the last frame.");
     }
     if (settings.scope === "all" && list.length < 2) throw new Error("Load at least two frames first.");
+    if (settings.retry_policy === "auto_budget" && settings.max_spend_usd <= 0) {
+      throw new Error("Auto-retry until budget is exhausted requires a maximum spend greater than $0.");
+    }
   }
 
   async function startJob() {
@@ -532,6 +595,30 @@
     }
   }
 
+  async function acceptAnyway() {
+    if (!currentJob?.id) return;
+    const latest = latestAttempt(currentJob);
+    if (!latest) return;
+    acceptAnywayButton.disabled = true;
+    try {
+      const job = await jsonRequest("/openai/accept", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          job_id: currentJob.id,
+          target_fraction: latest.target_fraction ?? currentJob.pending_target ?? null,
+        }),
+      });
+      renderJob(job);
+      statusBox.textContent = "Auditor rejection overridden. The generated frame is accepted and the server is continuing with the next target/gap.";
+      monitor(job.id, true);
+    } catch (error) {
+      statusBox.textContent = `Could not accept the generated frame: ${error.message}`;
+    } finally {
+      acceptAnywayButton.disabled = false;
+    }
+  }
+
   async function restoreJob() {
     const id = restoreId.value.trim() || activeJobId();
     if (!id) return void (statusBox.textContent = "Enter a Job ID to restore.");
@@ -539,6 +626,9 @@
     try {
       const job = await jsonRequest(`/openai/job?id=${encodeURIComponent(id)}`);
       renderJob(job);
+      if (currentFrames().length === 0 && Number(job.source_count || 0) > 0) {
+        await restoreSourceAnimation(job, false);
+      }
       if (!STOPPED.has(job.status)) monitor(job.id, true);
     } catch (error) {
       statusBox.textContent = `Could not restore job: ${error.message}`;
@@ -549,12 +639,14 @@
   scope.addEventListener("change", applyScope);
   loopClosure.addEventListener("change", applyScope);
   mode.addEventListener("change", applyMode);
+  retryPolicy.addEventListener("change", applyRetryPolicy);
   [left, right, count, maxFrames, minBenefit, retries, maxSpend, wholeContext, plannerModel, plannerEffort, imageModel, imageQuality, auditorModel, auditorEffort]
     .forEach(control => control.addEventListener("change", scheduleEstimate));
   instruction.addEventListener("input", scheduleEstimate);
   estimateButton.addEventListener("click", refreshEstimate);
   startButton.addEventListener("click", startJob);
   retryButton.addEventListener("click", retryJob);
+  acceptAnywayButton.addEventListener("click", acceptAnyway);
   restoreButton.addEventListener("click", restoreJob);
 
   const strip = document.getElementById("frameStrip");
@@ -564,6 +656,7 @@
   });
 
   applyMode();
+  applyRetryPolicy();
   updateFrameOptions();
   checkStatus().then(() => {
     const saved = activeJobId();
