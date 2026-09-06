@@ -2,12 +2,49 @@ from __future__ import annotations
 
 import gc
 import json
+import os
+import sys
 from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageChops
 
 CONTENT_MARGIN = 64
+
+
+def sanitise_legacy_torch_allocator_env() -> None:
+    """Strip allocator options unsupported by older isolated PyTorch builds.
+
+    The detached app may export ``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True``
+    for modern RIFE/main-PyTorch workloads. EDEN, SPEED and AMT intentionally run
+    in older isolated environments, and EDEN's torch 2.0.x rejects that option at
+    CUDA initialisation time. Preserve any other allocator settings while removing
+    only ``expandable_segments`` for those legacy workers.
+    """
+    script = Path(sys.argv[0] or "").name.lower()
+    if script not in {"eden_worker.py", "speed_worker.py", "amt_worker.py"}:
+        return
+    value = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+    if not value:
+        return
+    kept = []
+    for part in value.split(","):
+        item = part.strip()
+        if not item:
+            continue
+        key = item.split(":", 1)[0].split("=", 1)[0].strip().lower()
+        if key == "expandable_segments":
+            continue
+        kept.append(item)
+    if kept:
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = ",".join(kept)
+    else:
+        os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
+
+
+# This module is imported before torch by every isolated engine worker, so fix the
+# inherited allocator configuration before CUDA has any chance to initialise.
+sanitise_legacy_torch_allocator_env()
 
 
 def read_manifest(path: Path) -> dict:
