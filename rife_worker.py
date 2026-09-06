@@ -8,13 +8,16 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageChops
 
 # Reduce CUDA allocator fragmentation when supported. This must be set before
 # Practical-RIFE imports torch. Callers can still override it explicitly.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 RIFE_SCALES = (1.0, 0.5, 0.25)
+CONTENT_MARGIN = 64
+TILE_CORE = 384
+TILE_CONTEXT = 64
 
 
 def parse_args():
@@ -75,11 +78,16 @@ def load_model(rife_dir: Path, model_dir: Path):
             "ratio inference (v3.9+). Install the recommended RIFE 4.25 model."
         )
 
+    # Benchmark mode can retain large cuDNN workspaces, which is a poor trade-off
+    # on 4 GB cards. RIFE is still CUDA accelerated with it disabled.
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = False
+
     return torch, model
 
 
 def _padding_multiple(scale: float) -> int:
-    # Match Practical-RIFE's own inference_video.py padding rule. Lower internal
+    # Match Practical-RIFE's inference_video.py padding rule. Lower internal
     # scales need a larger input multiple so every IFNet stage remains aligned.
     return max(128, int(128 / scale))
 
@@ -110,7 +118,7 @@ def tensor_from_alpha(torch, image: Image.Image, device, scale: float):
 
 
 def rgb_from_tensor(tensor, h: int, w: int):
-    array = (
+    return (
         tensor[0, :, :h, :w]
         .clamp(0, 1)
         .mul(255)
@@ -119,11 +127,10 @@ def rgb_from_tensor(tensor, h: int, w: int):
         .numpy()
         .transpose(1, 2, 0)
     )
-    return array
 
 
 def alpha_from_tensor(tensor, h: int, w: int):
-    array = (
+    return (
         tensor[0, 0, :h, :w]
         .clamp(0, 1)
         .mul(255)
@@ -131,10 +138,9 @@ def alpha_from_tensor(tensor, h: int, w: int):
         .cpu()
         .numpy()
     )
-    return array
 
 
-def _clear_cuda_after_oom(torch):
+def _release_cuda(torch):
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -168,13 +174,17 @@ def _infer_with_scale_fallback(
             with torch.inference_mode():
                 middle = model.inference(first_tensor, second_tensor, ratio, scale)
             result = convert(middle, h, w)
+
+            # The returned result is a NumPy array on CPU. Release the frame-sized
+            # CUDA tensors immediately instead of letting allocator reservations
+            # accumulate between RGB, alpha, frames, or tiles on small GPUs.
+            del middle, second_tensor, first_tensor
+            _release_cuda(torch)
             return result, scale
         except torch.OutOfMemoryError as exc:
             last_error = exc
-            # Drop every tensor from the failed attempt before asking the CUDA
-            # allocator for a smaller inference. PyTorch's model stays resident.
             del middle, second_tensor, first_tensor
-            _clear_cuda_after_oom(torch)
+            _release_cuda(torch)
             if index + 1 < len(scales):
                 next_scale = scales[index + 1]
                 channel = "alpha" if alpha else "RGB"
@@ -190,12 +200,8 @@ def _infer_with_scale_fallback(
     raise RuntimeError("RIFE inference failed without an error.")
 
 
-def interpolate_pair(torch, model, first: Image.Image, second: Image.Image, ratio: float):
-    first = first.convert("RGBA")
-    second = second.convert("RGBA")
-    if first.size != second.size:
-        raise ValueError("RIFE input frames must have the same canvas size.")
-
+def _interpolate_region(torch, model, first: Image.Image, second: Image.Image, ratio: float):
+    """Interpolate one same-sized image region, including its alpha channel."""
     rgb, rgb_scale = _infer_with_scale_fallback(
         torch, model, first, second, ratio, alpha=False
     )
@@ -208,6 +214,9 @@ def interpolate_pair(torch, model, first: Image.Image, second: Image.Image, rati
         alpha = np.full((first.height, first.width), 255, dtype=np.uint8)
         alpha_scale = rgb_scale
     else:
+        # RGB inference is already on CPU at this point. Emptying the allocator
+        # before alpha inference is intentional for low-VRAM cards.
+        _release_cuda(torch)
         alpha, alpha_scale = _infer_with_scale_fallback(
             torch, model, first, second, ratio, alpha=True
         )
@@ -219,8 +228,106 @@ def interpolate_pair(torch, model, first: Image.Image, second: Image.Image, rati
             flush=True,
         )
 
-    rgba = np.dstack((rgb, alpha))
-    return Image.fromarray(rgba, "RGBA")
+    return Image.fromarray(np.dstack((rgb, alpha)), "RGBA")
+
+
+def _expanded_content_bbox(first: Image.Image, second: Image.Image):
+    """Return the union of visible pixels in both frames plus inference context."""
+    alpha_union = ImageChops.lighter(first.getchannel("A"), second.getchannel("A"))
+    bbox = alpha_union.getbbox()
+    if bbox is None:
+        return None
+
+    left, top, right, bottom = bbox
+    return (
+        max(0, left - CONTENT_MARGIN),
+        max(0, top - CONTENT_MARGIN),
+        min(first.width, right + CONTENT_MARGIN),
+        min(first.height, bottom + CONTENT_MARGIN),
+    )
+
+
+def _interpolate_tiled(torch, model, first: Image.Image, second: Image.Image, ratio: float):
+    """
+    Low-VRAM fallback using contextual tiles.
+
+    Each output pixel is taken from the central core of exactly one tile. The
+    surrounding context is supplied to RIFE but discarded, avoiding hard seams
+    caused by asking the model to infer directly at a tile boundary.
+    """
+    width, height = first.size
+    output = Image.new("RGBA", first.size, (0, 0, 0, 0))
+
+    tile_count_x = (width + TILE_CORE - 1) // TILE_CORE
+    tile_count_y = (height + TILE_CORE - 1) // TILE_CORE
+    print(
+        f"RIFE_TILE_FALLBACK size={width}x{height} "
+        f"grid={tile_count_x}x{tile_count_y}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+    for y0 in range(0, height, TILE_CORE):
+        y1 = min(height, y0 + TILE_CORE)
+        for x0 in range(0, width, TILE_CORE):
+            x1 = min(width, x0 + TILE_CORE)
+
+            ex0 = max(0, x0 - TILE_CONTEXT)
+            ey0 = max(0, y0 - TILE_CONTEXT)
+            ex1 = min(width, x1 + TILE_CONTEXT)
+            ey1 = min(height, y1 + TILE_CONTEXT)
+
+            tile0 = first.crop((ex0, ey0, ex1, ey1))
+            tile1 = second.crop((ex0, ey0, ex1, ey1))
+            tile_mid = _interpolate_region(torch, model, tile0, tile1, ratio)
+
+            core = tile_mid.crop((x0 - ex0, y0 - ey0, x1 - ex0, y1 - ey0))
+            output.paste(core, (x0, y0))
+
+            del tile_mid, tile1, tile0, core
+            _release_cuda(torch)
+
+    return output
+
+
+def interpolate_pair(torch, model, first: Image.Image, second: Image.Image, ratio: float):
+    first = first.convert("RGBA")
+    second = second.convert("RGBA")
+    if first.size != second.size:
+        raise ValueError("RIFE input frames must have the same canvas size.")
+
+    bbox = _expanded_content_bbox(first, second)
+    if bbox is None:
+        return Image.new("RGBA", first.size, (0, 0, 0, 0))
+
+    # Transparent animations often have a very large canvas around a much smaller
+    # subject. Never spend scarce VRAM interpolating pixels that are transparent
+    # in both endpoints. The union bbox still contains the full motion path.
+    region0 = first.crop(bbox)
+    region1 = second.crop(bbox)
+
+    if region0.size != first.size:
+        print(
+            f"RIFE_CONTENT_CROP canvas={first.width}x{first.height} "
+            f"region={region0.width}x{region0.height}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    try:
+        region_mid = _interpolate_region(torch, model, region0, region1, ratio)
+    except torch.OutOfMemoryError:
+        # Scale 0.25 still could not fit. Stop trying to squeeze a full frame into
+        # VRAM and process it as overlapping contextual tiles instead.
+        _release_cuda(torch)
+        region_mid = _interpolate_tiled(torch, model, region0, region1, ratio)
+
+    if region0.size == first.size:
+        return region_mid
+
+    output = Image.new("RGBA", first.size, (0, 0, 0, 0))
+    output.paste(region_mid, (bbox[0], bbox[1]))
+    return output
 
 
 def numeric_pngs(directory: Path):
@@ -267,6 +374,9 @@ def main():
 
         frame1.save(output_dir / f"{output_index:06d}.png")
         output_index += 1
+
+        del frame1, frame0
+        _release_cuda(torch)
 
 
 if __name__ == "__main__":
