@@ -1,7 +1,7 @@
       <section id="openaiInterrogator" class="openai-panel">
         <style>
           .openai-panel {
-            margin-top: 24px;
+            margin-top: 20px;
             padding: 18px;
             border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
             border-radius: 14px;
@@ -9,77 +9,39 @@
           }
           .openai-panel h2 { margin: 0 0 6px; font-size: 1.15rem; }
           .openai-panel > p { margin: 0 0 14px; font-size: .88rem; }
-          .openai-grid {
-            display: grid;
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 12px;
-          }
+          .openai-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
           .openai-grid .wide { grid-column: 1 / -1; }
           .openai-panel textarea, .openai-panel input[type="text"] {
-            width: 100%;
-            padding: 10px 12px;
-            border-radius: 10px;
+            width: 100%; padding: 10px 12px; border-radius: 10px;
             border: 1px solid color-mix(in srgb, CanvasText 20%, transparent);
-            background: Canvas;
-            color: CanvasText;
-            font: inherit;
+            background: Canvas; color: CanvasText; font: inherit;
           }
           .openai-panel textarea { min-height: 92px; resize: vertical; }
-          .openai-panel .mini-grid {
-            display: grid;
-            grid-template-columns: repeat(3, minmax(0, 1fr));
-            gap: 8px;
-          }
-          .openai-panel .openai-actions {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-            margin-top: 14px;
-          }
+          .openai-panel .openai-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
           .openai-panel .openai-actions button {
-            width: auto;
-            margin: 0;
-            padding: 9px 12px;
-            border-radius: 9px;
+            width: auto; margin: 0; padding: 9px 12px; border-radius: 9px;
             border: 1px solid color-mix(in srgb, CanvasText 20%, transparent);
-            background: Canvas;
-            color: CanvasText;
-            font-weight: 700;
+            background: Canvas; color: CanvasText; font-weight: 700;
           }
-          .openai-panel .openai-actions button.primary {
-            border: 0;
-            background: Highlight;
-            color: HighlightText;
-          }
+          .openai-panel .openai-actions button.primary { border: 0; background: Highlight; color: HighlightText; }
           .openai-status-line, .openai-cost, .openai-job {
-            margin-top: 12px;
-            padding: 10px 12px;
-            border-radius: 10px;
-            background: color-mix(in srgb, CanvasText 5%, Canvas);
-            font-size: .84rem;
-            line-height: 1.45;
-            white-space: pre-wrap;
+            margin-top: 12px; padding: 10px 12px; border-radius: 10px;
+            background: color-mix(in srgb, CanvasText 5%, Canvas); font-size: .84rem;
+            line-height: 1.45; white-space: pre-wrap;
           }
           .openai-job[hidden], .openai-review[hidden] { display: none; }
-          .openai-job code { user-select: all; }
           .openai-review { margin-top: 12px; }
           .openai-review textarea { margin-top: 6px; }
-          .openai-attempts { margin-top: 8px; display: grid; gap: 6px; }
-          .openai-attempt {
-            padding: 8px 10px;
-            border: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
-            border-radius: 8px;
-          }
           @media (max-width: 620px) {
-            .openai-grid, .openai-panel .mini-grid { grid-template-columns: 1fr; }
+            .openai-grid { grid-template-columns: 1fr; }
             .openai-grid .wide { grid-column: auto; }
           }
         </style>
+
         <h2>OpenAI Interrogator</h2>
         <p>
-          Optional paid semantic interpolation. It plans a missing temporal state from the supplied animation,
-          generates one frame at a time, audits the result, and can learn from rejected attempts. Accepted frames
-          can be inserted back into this animation and then smoothed further with local RIFE above.
+          Optional paid semantic interpolation. OpenAI creates and audits semantic keyframes first;
+          accepted frames are inserted into the animation before the local RIFE stage below, so RIFE can make the final smooth in-betweens for free.
         </p>
 
         <div class="openai-grid">
@@ -92,7 +54,16 @@
           </label>
 
           <label class="option">
-            Interpolation mode
+            Where to interpolate
+            <select id="oiScope">
+              <option value="pair">One selected gap</option>
+              <option value="range">Every adjacent gap in a selected range</option>
+              <option value="all">Every adjacent pair in the animation</option>
+            </select>
+          </label>
+
+          <label class="option">
+            Interpolation mode per gap
             <select id="oiMode">
               <option value="single">Single missing frame</option>
               <option value="fixed">Fixed number of missing frames</option>
@@ -101,27 +72,27 @@
           </label>
 
           <label class="option" id="oiLeftWrap">
-            Earlier anchor
+            <span id="oiLeftLabel">Earlier anchor</span>
             <select id="oiLeft"></select>
           </label>
 
           <label class="option" id="oiRightWrap">
-            Later anchor
+            <span id="oiRightLabel">Later anchor</span>
             <select id="oiRight"></select>
           </label>
 
           <label class="checkbox wide" id="oiLoopClosureWrap" hidden>
             <input type="checkbox" id="oiLoopClosure">
-            Treat the selected gap as loop closure (last frame → first frame)
+            <span id="oiLoopClosureText">Use the last → first gap as loop closure</span>
           </label>
 
           <label class="option" id="oiCountWrap" hidden>
-            Missing frames
+            Missing frames per gap
             <input id="oiCount" type="number" value="2" min="1" max="16">
           </label>
 
           <label class="option" id="oiMaxFramesWrap" hidden>
-            Maximum frames in Auto mode
+            Maximum generated frames per gap in Auto mode
             <input id="oiMaxFrames" type="number" value="6" min="1" max="32">
           </label>
 
@@ -136,18 +107,21 @@
           </label>
 
           <label class="option">
-            Maximum OpenAI spend for this job (USD, 0 = no cap)
+            Maximum OpenAI spend for the whole job (USD, 0 = no cap)
             <input id="oiMaxSpend" type="number" value="1.00" min="0" max="1000" step="0.01">
           </label>
 
           <label class="checkbox wide">
             <input type="checkbox" id="oiWholeContext" checked>
-            Let the planner and auditor inspect the whole known animation as sequence context
+            Give the full animation to the planner and auditor as sequence context
           </label>
+          <div class="hint wide">
+            When enabled, every known frame is represented in the labelled timeline context while the immediate two anchors are also supplied at full resolution. This costs more input tokens but helps with cadence, direction, incomplete sequences and loop phase.
+          </div>
 
           <label class="option wide">
             User guidance (optional)
-            <textarea id="oiInstruction" placeholder="Describe intent only when useful. The planner will inspect the frames and refine this into a precise interpolation plan."></textarea>
+            <textarea id="oiInstruction" placeholder="Describe intent only when useful. The planner visually inspects the animation and refines this into a precise interpolation plan."></textarea>
             <span class="hint">The base prompt is generic and makes no assumptions about what the animation contains.</span>
           </label>
 
@@ -155,7 +129,6 @@
             Planner model
             <input id="oiPlannerModel" type="text" value="gpt-5.6-luna" list="oiReasoningModels">
           </label>
-
           <label class="option">
             Planner thinking effort
             <select id="oiPlannerEffort">
@@ -163,24 +136,20 @@
               <option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Max</option>
             </select>
           </label>
-
           <label class="option">
             Image model
             <input id="oiImageModel" type="text" value="gpt-image-2">
           </label>
-
           <label class="option">
             Image quality
             <select id="oiImageQuality">
               <option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option>
             </select>
           </label>
-
           <label class="option">
             Auditor model
             <input id="oiAuditorModel" type="text" value="gpt-5.6-luna" list="oiReasoningModels">
           </label>
-
           <label class="option">
             Auditor thinking effort
             <select id="oiAuditorEffort">
@@ -209,7 +178,7 @@
         <div class="openai-review" id="oiReview" hidden>
           <label class="option">
             Feedback for the next attempt
-            <textarea id="oiFeedback" placeholder="Explain what was wrong. The replanner will also inspect the rejected image and auditor report before trying again."></textarea>
+            <textarea id="oiFeedback" placeholder="Explain what was wrong. The replanner will inspect the rejected image and auditor report before trying again."></textarea>
           </label>
           <div class="openai-actions">
             <button type="button" id="oiRetry" class="primary">Learn from this attempt and try again</button>
