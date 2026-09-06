@@ -10,91 +10,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: vendor/openai-schema/package-lock.json
-
       - name: Install Python dependencies
         run: python -m pip install -r requirements.txt
 
-      - name: Build and test vendored openai-schema
-        working-directory: vendor/openai-schema
+      - name: Check Python syntax and persistent app import
         run: |
-          npm ci
-          npm run ci
-
-      - name: Check Python syntax and unified app import
-        run: |
-          python -m py_compile app.py app_openai.py app_all.py global_jobs.py resilient_bridge.py cancellable_openai.py openai_interrogator.py openai_batch.py openai_job_features.py anim_align_webp.py rife_worker.py setup_openai.py setup_rife.py
+          python -m py_compile app.py app_all.py global_jobs.py anim_align_webp.py rife_worker.py setup_rife.py
           python - <<'PY'
           import app_all
-          from cancellable_openai import CancellableEnhancedOpenAIJobManager
-          from resilient_bridge import ResilientAuditorAwareBridgeClient
-          assert b"OpenAI Interrogator" in app_all.INDEX_HTML
           assert b"Recoverable job" in app_all.INDEX_HTML
           assert b"Final WebP preview" in app_all.INDEX_HTML
-          assert b"Ignore auditor and continue" in app_all.INDEX_HTML
-          assert b"openai-cancel.js" in app_all.INDEX_HTML
-          assert isinstance(app_all.enhanced.OPENAI, CancellableEnhancedOpenAIJobManager)
-          assert isinstance(app_all.enhanced.OPENAI.bridge, ResilientAuditorAwareBridgeClient)
-          assert app_all.enhanced.BATCH.child_manager is app_all.enhanced.OPENAI
-          assert app_all.enhanced.BATCH.child_manager.bridge is app_all.enhanced.OPENAI.bridge
-          status = app_all.enhanced.OPENAI.bridge.status()
-          assert "key_configured" in status
-          assert "schema_built" in status
+          assert b"workspace-ui.js" in app_all.INDEX_HTML
           PY
 
-      - name: Test job orchestration and persistence
-        run: python -m unittest -v test_openai_interrogator.py test_openai_batch.py test_openai_job_features.py test_global_jobs.py test_resilient_bridge.py test_cancellable_openai.py
+      - name: Test durable jobs
+        run: python -m unittest -v test_global_jobs.py
 
-      - name: Check browser and bridge JavaScript syntax
-        run: |
-          node --check openai_bridge/server.mjs
-          node --check openai_ui/interrogator.js
-          node --check openai_ui/cancel.js
-          node --check workspace_ui/workspace.js
-          node --check workspace_ui/openai-link.js
-          node --check test_openai_bridge.mjs
-
-      - name: Test image moderation recovery without OpenAI
-        run: node test_openai_bridge.mjs
-
-      - name: Smoke-test local bridge without API calls
+      - name: Ensure retired semantic interpolator is gone
         shell: bash
         run: |
           set -euo pipefail
-          OPENAI_BRIDGE_PORT=18745 node openai_bridge/server.mjs >/tmp/openai-bridge.log 2>&1 &
-          pid=$!
-          trap 'kill "$pid" 2>/dev/null || true' EXIT
-          for i in {1..30}; do
-            if curl -fsS http://127.0.0.1:18745/health >/tmp/health.json; then break; fi
-            sleep 0.2
-          done
-          python - <<'PY'
-          import json
-          with open('/tmp/health.json', encoding='utf-8') as f:
-              health = json.load(f)
-          assert health['ok'] is True
-          assert health['key_configured'] is False
-          assert health['version'] >= 4
-          PY
-          curl -fsS -X POST http://127.0.0.1:18745/estimate \
-            -H 'content-type: application/json' \
-            -d '{"planner_model":"gpt-5.6-luna","auditor_model":"gpt-5.6-luna","image_quality":"medium","width":2120,"height":2736,"reference_count":2,"context_count":1,"attempts":1}' \
-            >/tmp/estimate.json
-          python - <<'PY'
-          import json
-          with open('/tmp/estimate.json', encoding='utf-8') as f:
-              estimate = json.load(f)
-          assert estimate['one_attempt'] > 0
-          assert estimate['maximum'] >= estimate['one_attempt']
-          PY
+          if git ls-files | grep -i 'open''ai'; then
+            echo 'Retired semantic-interpolator files are still tracked.' >&2
+            exit 1
+          fi
+          if git grep -n -i 'open''ai' -- .; then
+            echo 'Retired semantic-interpolator references are still present.' >&2
+            exit 1
+          fi
