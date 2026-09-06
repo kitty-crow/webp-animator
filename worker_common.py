@@ -107,6 +107,142 @@ def gap_score(first: Image.Image, second: Image.Image, alpha_threshold: int = 8)
     return _score_arrays(_rgba_array(first), _rgba_array(second), alpha_threshold)
 
 
+def fixed_midpoint_fill(
+    first: Image.Image,
+    second: Image.Image,
+    *,
+    count: int,
+    generate_midpoint,
+    save_midpoint,
+    alpha_threshold: int = 8,
+):
+    """Generate exactly ``count`` midpoint-only frames.
+
+    Midpoint-only models cannot directly ask for arbitrary t. Split the currently
+    longest temporal interval first, using visual gap score as a tie-breaker. This
+    keeps the final temporal spacing as even as the model permits while preserving
+    the exact requested frame count.
+    """
+    count = max(0, int(count))
+    if count <= 0:
+        return []
+
+    segments = [
+        {
+            "t0": 0.0,
+            "t1": 1.0,
+            "left": first,
+            "right": second,
+            "score": gap_score(first, second, alpha_threshold),
+        }
+    ]
+    generated = []
+
+    for _ in range(count):
+        index = max(
+            range(len(segments)),
+            key=lambda i: (
+                segments[i]["t1"] - segments[i]["t0"],
+                segments[i]["score"],
+            ),
+        )
+        segment = segments.pop(index)
+        tm = (segment["t0"] + segment["t1"]) * 0.5
+        middle = generate_midpoint(segment["left"], segment["right"])
+        ref = save_midpoint(middle, tm)
+        generated.append((tm, ref))
+        segments.extend(
+            [
+                {
+                    "t0": segment["t0"],
+                    "t1": tm,
+                    "left": segment["left"],
+                    "right": middle,
+                    "score": gap_score(segment["left"], middle, alpha_threshold),
+                },
+                {
+                    "t0": tm,
+                    "t1": segment["t1"],
+                    "left": middle,
+                    "right": segment["right"],
+                    "score": gap_score(middle, segment["right"], alpha_threshold),
+                },
+            ]
+        )
+
+    generated.sort(key=lambda item: item[0])
+    return [ref for _, ref in generated]
+
+
+def adaptive_midpoint_fill(
+    first: Image.Image,
+    second: Image.Image,
+    *,
+    threshold: float,
+    max_frames: int,
+    generate_midpoint,
+    save_midpoint,
+    alpha_threshold: int = 8,
+):
+    """Fill the worst remaining sub-gap until every gap meets the threshold.
+
+    ``max_frames`` is a safety ceiling for automatic mode. The result contains the
+    ordered saved-frame refs plus diagnostics so the caller can report whether the
+    requested threshold was actually achieved.
+    """
+    max_frames = max(0, int(max_frames))
+    threshold = float(threshold)
+    segments = [
+        {
+            "t0": 0.0,
+            "t1": 1.0,
+            "left": first,
+            "right": second,
+            "score": gap_score(first, second, alpha_threshold),
+        }
+    ]
+    generated = []
+
+    while len(generated) < max_frames:
+        worst_index = max(range(len(segments)), key=lambda i: segments[i]["score"])
+        worst = segments[worst_index]
+        if float(worst["score"]) <= threshold:
+            break
+
+        segment = segments.pop(worst_index)
+        tm = (segment["t0"] + segment["t1"]) * 0.5
+        middle = generate_midpoint(segment["left"], segment["right"])
+        ref = save_midpoint(middle, tm)
+        generated.append((tm, ref))
+        segments.extend(
+            [
+                {
+                    "t0": segment["t0"],
+                    "t1": tm,
+                    "left": segment["left"],
+                    "right": middle,
+                    "score": gap_score(segment["left"], middle, alpha_threshold),
+                },
+                {
+                    "t0": tm,
+                    "t1": segment["t1"],
+                    "left": middle,
+                    "right": segment["right"],
+                    "score": gap_score(middle, segment["right"], alpha_threshold),
+                },
+            ]
+        )
+
+    generated.sort(key=lambda item: item[0])
+    max_score = max((float(segment["score"]) for segment in segments), default=0.0)
+    return {
+        "frames": [ref for _, ref in generated],
+        "satisfied": max_score <= threshold,
+        "max_score": max_score,
+        "limit_reached": len(generated) >= max_frames and max_score > threshold,
+    }
+
+
 def recursive_midpoints(
     first: Image.Image,
     second: Image.Image,
