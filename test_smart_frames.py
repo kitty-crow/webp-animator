@@ -23,6 +23,16 @@ class SmartFrameTests(unittest.TestCase):
         score = gap_scores([first, second])[0]
         self.assertGreater(score, 50.0)
 
+    def test_hidden_rgb_under_zero_alpha_is_not_visual_change(self):
+        first = Image.new("RGBA", (32, 32), (255, 0, 0, 0))
+        second = Image.new("RGBA", (32, 32), (0, 255, 255, 0))
+        self.assertEqual(gap_scores([first, second])[0], 0.0)
+
+    def test_alpha_change_is_visual_change_even_when_rgb_matches(self):
+        first = Image.new("RGBA", (32, 32), (120, 80, 30, 0))
+        second = Image.new("RGBA", (32, 32), (120, 80, 30, 255))
+        self.assertGreater(gap_scores([first, second])[0], 20.0)
+
     def test_non_adjacent_removal_round_never_deletes_neighbours_together(self):
         chosen = non_adjacent_removals([0.1, 0.2, 0.3, 0.1], 1.0)
         self.assertTrue(chosen)
