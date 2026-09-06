@@ -34,9 +34,6 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
             except PermissionError:
                 if attempt == 39:
                     raise
-                # Windows does not allow replacing a file while another thread or
-                # scanner has it open without delete sharing. Browser polling can
-                # briefly overlap a manifest read, so retry after the reader closes.
                 time.sleep(min(0.01 * (attempt + 1), 0.10))
     finally:
         try:
@@ -46,13 +43,7 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
 
 
 class OpenAIBatchManager:
-    """Orchestrates multiple ordinary OpenAI interpolation jobs behind one Job ID.
-
-    The existing OpenAIJobManager remains the authoritative worker for each temporal gap.
-    This wrapper only owns the ordered gap queue and aggregates child results. That keeps
-    the already-tested planner/generator/auditor/retry logic unchanged while allowing a
-    selected range or the entire animation to be processed in the background.
-    """
+    """Orchestrates multiple ordinary OpenAI interpolation jobs behind one Job ID."""
 
     def __init__(self, root: Path, child_manager: OpenAIJobManager):
         self.root = root
@@ -126,15 +117,9 @@ class OpenAIBatchManager:
             right = max(0, min(frame_count - 1, int(request.get("right_index", frame_count - 1))))
             if left >= right:
                 raise ValueError("For range interpolation, the first frame must come before the last frame.")
-            return [
-                {"left_index": index, "right_index": index + 1, "loop_closure": False}
-                for index in range(left, right)
-            ]
+            return [{"left_index": index, "right_index": index + 1, "loop_closure": False} for index in range(left, right)]
         if scope == "all":
-            segments = [
-                {"left_index": index, "right_index": index + 1, "loop_closure": False}
-                for index in range(frame_count - 1)
-            ]
+            segments = [{"left_index": index, "right_index": index + 1, "loop_closure": False} for index in range(frame_count - 1)]
             if str(request.get("sequence_mode", "open")).lower() == "loop" and bool(request.get("include_loop_closure")):
                 segments.append({"left_index": frame_count - 1, "right_index": 0, "loop_closure": True})
             return segments
@@ -154,15 +139,7 @@ class OpenAIBatchManager:
             path.write_bytes(payload)
             stored.append({"name": name, "path": str(path.relative_to(self._job_dir(job_id)))})
 
-        tasks = [
-            {
-                "index": index,
-                **segment,
-                "status": "pending",
-                "child_id": None,
-            }
-            for index, segment in enumerate(segments)
-        ]
+        tasks = [{"index": index, **segment, "status": "pending", "child_id": None} for index, segment in enumerate(segments)]
         normal_request = dict(request)
         normal_request["scope"] = str(request.get("scope", "range")).lower()
 
@@ -181,6 +158,7 @@ class OpenAIBatchManager:
             "current_task": None,
             "current_child_id": None,
             "error": None,
+            "cancel_requested": False,
         }
         self._save(job)
         self._start(job_id)
@@ -198,24 +176,49 @@ class OpenAIBatchManager:
             if job_id in self.running:
                 return
             self.running.add(job_id)
-        thread = threading.Thread(target=self._work, args=(job_id,), daemon=True, name=f"openai-batch-{job_id[:8]}")
-        thread.start()
+        threading.Thread(target=self._work, args=(job_id,), daemon=True, name=f"openai-batch-{job_id[:8]}").start()
 
     def _spent(self, job: dict[str, Any]) -> float:
         total = 0.0
         for task in job.get("tasks", []):
             child_id = task.get("child_id")
-            if not child_id:
-                continue
-            child = self.child_manager.get(str(child_id))
-            if child:
-                total += float(child.get("spent_usd", 0.0))
+            if child_id:
+                child = self.child_manager.get(str(child_id))
+                if child:
+                    total += float(child.get("spent_usd", 0.0))
         return total
+
+    def cancel(self, job_id: str) -> dict[str, Any]:
+        job = self.get(job_id)
+        if not job:
+            raise KeyError(job_id)
+        child_id = job.get("current_child_id")
+        if child_id:
+            cancel_child = getattr(self.child_manager, "cancel", None)
+            if callable(cancel_child):
+                try:
+                    cancel_child(str(child_id))
+                except KeyError:
+                    pass
+        job = self.get(job_id) or job
+        job["cancel_requested"] = True
+        job["status"] = "cancelled"
+        job["stage"] = "cancelled"
+        job["error"] = None
+        job["message"] = (
+            "Stopped by user. No further gaps or OpenAI stages will be started. "
+            "A request already in flight may still finish remotely."
+        )
+        self._save(job)
+        return self.public(job)
+
+    def _cancelled(self, job: dict[str, Any]) -> bool:
+        return bool(job.get("cancel_requested") or job.get("status") == "cancelled")
 
     def _work(self, job_id: str) -> None:
         try:
             job = self.get(job_id)
-            if not job:
+            if not job or self._cancelled(job):
                 return
             job["status"] = "running"
             job["stage"] = "starting"
@@ -225,7 +228,7 @@ class OpenAIBatchManager:
 
             while True:
                 job = self.get(job_id)
-                if not job:
+                if not job or self._cancelled(job):
                     return
                 tasks = list(job.get("tasks", []))
                 pending_index = next((i for i, item in enumerate(tasks) if item.get("status") != "done"), None)
@@ -242,6 +245,9 @@ class OpenAIBatchManager:
                 task = tasks[pending_index]
                 child_id = task.get("child_id")
                 if not child_id:
+                    job = self.get(job_id) or job
+                    if self._cancelled(job):
+                        return
                     spent = self._spent(job)
                     maximum = max(0.0, float(job.get("request", {}).get("max_spend_usd", 0.0) or 0.0))
                     remaining_budget = 0.0 if maximum <= 0 else maximum - spent
@@ -269,28 +275,25 @@ class OpenAIBatchManager:
                     job["current_child_id"] = child["id"]
                     job["status"] = "waiting_child"
                     job["stage"] = "interpolating"
-                    job["message"] = (
-                        f"Processing gap {pending_index + 1}/{len(tasks)}: "
-                        f"frame {int(task['left_index']) + 1} → frame {int(task['right_index']) + 1}"
-                    )
+                    job["message"] = f"Processing gap {pending_index + 1}/{len(tasks)}: frame {int(task['left_index']) + 1} → frame {int(task['right_index']) + 1}"
                     job["progress"] = round((pending_index / max(1, len(tasks))) * 100, 1)
                     self._save(job)
                     child_id = child["id"]
 
                 while True:
+                    job = self.get(job_id) or job
+                    if self._cancelled(job):
+                        return
                     child = self.child_manager.get(str(child_id))
                     if not child:
                         raise RuntimeError(f"Child OpenAI job {child_id} disappeared.")
                     status = str(child.get("status", ""))
                     if status in ACTIVE_STATES:
-                        job = self.get(job_id) or job
                         job["status"] = "waiting_child"
                         job["stage"] = str(child.get("stage", "interpolating"))
                         child_progress = float(child.get("progress", 0.0))
                         job["progress"] = round(((pending_index + child_progress / 100.0) / max(1, len(tasks))) * 100, 1)
-                        job["message"] = (
-                            f"Gap {pending_index + 1}/{len(tasks)} · {child.get('message', status)}"
-                        )
+                        job["message"] = f"Gap {pending_index + 1}/{len(tasks)} · {child.get('message', status)}"
                         self._save(job)
                         time.sleep(0.6)
                         continue
@@ -299,7 +302,6 @@ class OpenAIBatchManager:
                         time.sleep(0.2)
                         continue
                     if status == "done":
-                        job = self.get(job_id) or job
                         tasks = list(job.get("tasks", []))
                         tasks[pending_index]["status"] = "done"
                         job["tasks"] = tasks
@@ -309,30 +311,28 @@ class OpenAIBatchManager:
                         self._save(job)
                         break
                     if status in {"needs_review", "budget_wait"}:
-                        job = self.get(job_id) or job
                         job["status"] = status
                         job["stage"] = str(child.get("stage", status))
                         job["current_task"] = pending_index
                         job["current_child_id"] = child_id
-                        job["message"] = (
-                            f"Gap {pending_index + 1}/{len(tasks)} paused: {child.get('message', status)}"
-                        )
+                        job["message"] = f"Gap {pending_index + 1}/{len(tasks)} paused: {child.get('message', status)}"
                         self._save(job)
                         return
                     if status in {"error", "cancelled"}:
-                        job = self.get(job_id) or job
                         job["status"] = status
                         job["stage"] = status
                         job["current_task"] = pending_index
                         job["current_child_id"] = child_id
                         job["error"] = child.get("error") or child.get("message") or f"Child job {status}."
-                        job["message"] = f"Gap {pending_index + 1}/{len(tasks)} failed"
+                        job["message"] = f"Gap {pending_index + 1}/{len(tasks)} {'stopped' if status == 'cancelled' else 'failed'}"
+                        if status == "cancelled":
+                            job["cancel_requested"] = True
                         self._save(job)
                         return
                     time.sleep(0.6)
         except Exception as exc:
             job = self.get(job_id)
-            if job:
+            if job and not self._cancelled(job):
                 job["status"] = "error"
                 job["stage"] = "error"
                 job["error"] = str(exc)
@@ -375,7 +375,6 @@ class OpenAIBatchManager:
         segments: list[dict[str, Any]] = []
         estimated_next = 0.0
         pending_target = None
-
         for task in job.get("tasks", []):
             child_id = task.get("child_id")
             child_public = None
@@ -384,55 +383,23 @@ class OpenAIBatchManager:
                 if child:
                     child_public = self.child_manager.public(child)
                     for attempt in child_public.get("attempts", []):
-                        attempts.append({
-                            **attempt,
-                            "job_id": child_id,
-                            "segment_index": task.get("index"),
-                            "left_index": task.get("left_index"),
-                            "right_index": task.get("right_index"),
-                            "loop_closure": bool(task.get("loop_closure")),
-                        })
+                        attempts.append({**attempt, "job_id": child_id, "segment_index": task.get("index"), "left_index": task.get("left_index"), "right_index": task.get("right_index"), "loop_closure": bool(task.get("loop_closure"))})
                     for result in child_public.get("accepted", []):
-                        accepted.append({
-                            **result,
-                            "job_id": child_id,
-                            "segment_index": task.get("index"),
-                            "left_index": task.get("left_index"),
-                            "right_index": task.get("right_index"),
-                            "loop_closure": bool(task.get("loop_closure")),
-                        })
+                        accepted.append({**result, "job_id": child_id, "segment_index": task.get("index"), "left_index": task.get("left_index"), "right_index": task.get("right_index"), "loop_closure": bool(task.get("loop_closure"))})
                     if str(child_id) == str(job.get("current_child_id") or ""):
                         estimated_next = float(child_public.get("estimated_next_usd", 0.0) or 0.0)
                         pending_target = child_public.get("pending_target")
-            segments.append({
-                "index": task.get("index"),
-                "left_index": task.get("left_index"),
-                "right_index": task.get("right_index"),
-                "loop_closure": bool(task.get("loop_closure")),
-                "status": child_public.get("status") if child_public else task.get("status", "pending"),
-                "child_id": child_id,
-            })
+            segments.append({"index": task.get("index"), "left_index": task.get("left_index"), "right_index": task.get("right_index"), "loop_closure": bool(task.get("loop_closure")), "status": child_public.get("status") if child_public else task.get("status", "pending"), "child_id": child_id})
 
         attempts.sort(key=lambda item: (int(item.get("segment_index") or 0), float(item.get("target_fraction") or 0), int(item.get("attempt") or 0)))
         accepted.sort(key=lambda item: (int(item.get("segment_index") or 0), float(item.get("target_fraction") or 0)))
         return {
-            "id": job.get("id"),
-            "kind": "batch",
-            "status": job.get("status"),
-            "stage": job.get("stage"),
-            "progress": job.get("progress", 0),
-            "message": job.get("message", ""),
-            "error": job.get("error"),
-            "created": job.get("created"),
-            "updated": job.get("updated"),
-            "spent_usd": self._spent(job),
-            "estimated_next_usd": estimated_next,
-            "request": job.get("request", {}),
-            "attempts": attempts,
-            "accepted": accepted,
-            "pending_target": pending_target,
-            "segments": segments,
-            "current_child_id": job.get("current_child_id"),
+            "id": job.get("id"), "kind": "batch", "status": job.get("status"), "stage": job.get("stage"),
+            "progress": job.get("progress", 0), "message": job.get("message", ""), "error": job.get("error"),
+            "created": job.get("created"), "updated": job.get("updated"), "spent_usd": self._spent(job),
+            "estimated_next_usd": estimated_next, "request": job.get("request", {}), "attempts": attempts,
+            "accepted": accepted, "pending_target": pending_target, "segments": segments,
+            "current_child_id": job.get("current_child_id"), "cancel_requested": bool(job.get("cancel_requested")),
         }
 
     def delete(self, job_id: str) -> None:
@@ -443,12 +410,11 @@ class OpenAIBatchManager:
             raise RuntimeError("Cannot delete a running multi-gap job.")
         for task in job.get("tasks", []):
             child_id = task.get("child_id")
-            if not child_id:
-                continue
-            try:
-                self.child_manager.delete(str(child_id))
-            except Exception:
-                pass
+            if child_id:
+                try:
+                    self.child_manager.delete(str(child_id))
+                except Exception:
+                    pass
         shutil.rmtree(self._job_dir(job_id), ignore_errors=True)
 
     def cleanup(self) -> None:
