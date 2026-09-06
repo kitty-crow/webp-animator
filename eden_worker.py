@@ -11,9 +11,11 @@ from PIL import Image
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 from worker_common import (
+    adaptive_midpoint_fill,
     alpha_midpoint,
     compose_rgb_with_alpha,
     content_bbox,
+    fixed_midpoint_fill,
     is_cuda_oom,
     load_rgba,
     read_manifest,
@@ -43,6 +45,13 @@ def _resize_pair(first: Image.Image, second: Image.Image, scale: float):
         first.resize((width, height), Image.Resampling.LANCZOS),
         second.resize((width, height), Image.Resampling.LANCZOS),
     )
+
+
+def _expected(task: dict) -> int:
+    if "count" not in task:
+        return 1
+    count = max(0, int(task.get("count", 0)))
+    return count if count > 0 else max(1, int(task.get("max_frames", 31)))
 
 
 def main():
@@ -134,43 +143,93 @@ def main():
         release_cuda(torch)
         return Image.fromarray(rgb, "RGB")
 
-    tasks = list(manifest.get("tasks", []))
-    results = []
-    for task_index, task in enumerate(tasks):
-        first = load_rgba(Path(task["left"]))
-        second = load_rgba(Path(task["right"]))
+    def generate_midpoint(first: Image.Image, second: Image.Image):
         if first.size != second.size:
             raise ValueError("EDEN frames must share one canvas")
         bbox = content_bbox(first, second)
         if bbox is None:
-            generated = Image.new("RGBA", first.size, (0, 0, 0, 0))
-        else:
-            crop0 = first.crop(bbox)
-            crop1 = second.crop(bbox)
-            original_size = crop0.size
-            rgb_result = None
-            last_message = None
-            for scale in ((1.0, 0.75, 0.5, 0.375) if device.type == "cuda" else (1.0,)):
-                try:
-                    scaled0, scaled1 = _resize_pair(crop0, crop1, scale)
-                    rgb_result = interpolate_rgb(scaled0, scaled1)
-                    if rgb_result.size != original_size:
-                        rgb_result = rgb_result.resize(original_size, Image.Resampling.LANCZOS)
-                    break
-                except Exception as exc:
-                    if not is_cuda_oom(torch, exc):
-                        raise
-                    last_message = str(exc)
-                    release_cuda(torch)
-            if rgb_result is None:
-                raise RuntimeError(last_message or "EDEN failed to generate a frame")
-            alpha = alpha_midpoint(crop0, crop1)
-            generated = compose_rgb_with_alpha(rgb_result, alpha, first.size, bbox)
+            return Image.new("RGBA", first.size, (0, 0, 0, 0))
 
-        path = output_dir / f"{task_index:04d}.png"
-        generated.save(path)
-        results.append({"id": task.get("id", str(task_index)), "frame": str(path)})
-        print(f"PROGRESS {task_index + 1} {max(1, len(tasks))}", flush=True)
+        crop0 = first.crop(bbox)
+        crop1 = second.crop(bbox)
+        original_size = crop0.size
+        rgb_result = None
+        last_message = None
+        for scale in ((1.0, 0.75, 0.5, 0.375) if device.type == "cuda" else (1.0,)):
+            try:
+                scaled0, scaled1 = _resize_pair(crop0, crop1, scale)
+                rgb_result = interpolate_rgb(scaled0, scaled1)
+                if rgb_result.size != original_size:
+                    rgb_result = rgb_result.resize(original_size, Image.Resampling.LANCZOS)
+                break
+            except Exception as exc:
+                if not is_cuda_oom(torch, exc):
+                    raise
+                last_message = str(exc)
+                release_cuda(torch)
+        if rgb_result is None:
+            raise RuntimeError(last_message or "EDEN failed to generate a frame")
+        alpha = alpha_midpoint(crop0, crop1)
+        return compose_rgb_with_alpha(rgb_result, alpha, first.size, bbox)
+
+    tasks = list(manifest.get("tasks", []))
+    total_expected = sum(_expected(task) for task in tasks)
+    completed = 0
+    results = []
+
+    for task_index, task in enumerate(tasks):
+        first = load_rgba(Path(task["left"]))
+        second = load_rgba(Path(task["right"]))
+        counter = 0
+
+        def save(image, t):
+            nonlocal counter, completed
+            path = output_dir / f"{task_index:04d}_{counter:04d}.png"
+            counter += 1
+            image.save(path)
+            completed += 1
+            print(f"PROGRESS {completed} {max(1, total_expected)}", flush=True)
+            return {"path": str(path), "t": float(t)}
+
+        diagnostics = {}
+        if "count" not in task:
+            ref = save(generate_midpoint(first, second), 0.5)
+            refs = [ref]
+        else:
+            count = max(0, int(task.get("count", 0)))
+            if count > 0:
+                refs = fixed_midpoint_fill(
+                    first,
+                    second,
+                    count=count,
+                    generate_midpoint=generate_midpoint,
+                    save_midpoint=save,
+                    alpha_threshold=int(task.get("alpha_threshold", 8)),
+                )
+                diagnostics = {"satisfied": True, "limit_reached": False}
+            else:
+                outcome = adaptive_midpoint_fill(
+                    first,
+                    second,
+                    threshold=float(task.get("threshold", 12.0)),
+                    max_frames=max(1, int(task.get("max_frames", 31))),
+                    generate_midpoint=generate_midpoint,
+                    save_midpoint=save,
+                    alpha_threshold=int(task.get("alpha_threshold", 8)),
+                )
+                refs = outcome["frames"]
+                diagnostics = {
+                    "satisfied": bool(outcome["satisfied"]),
+                    "limit_reached": bool(outcome["limit_reached"]),
+                    "max_score": float(outcome["max_score"]),
+                }
+
+        results.append({
+            "id": task.get("id", str(task_index)),
+            "frame": refs[0]["path"] if refs else None,
+            "frames": refs,
+            **diagnostics,
+        })
         release_cuda(torch)
 
     write_result(args.result, {"tasks": results})
