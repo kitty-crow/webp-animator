@@ -39,6 +39,7 @@
 
   const JOBS_KEY = "webp-animator-openai-jobs-v1";
   const ACTIVE_KEY = "webp-animator-openai-active-v1";
+  const STOPPED = new Set(["done", "error", "needs_review", "budget_wait", "interrupted", "cancelled"]);
   let openaiReady = false;
   let currentJob = null;
   let monitorToken = 0;
@@ -74,7 +75,7 @@
     jobs.unshift({ id: job.id, created: job.created || Date.now() / 1000 });
     try {
       localStorage.setItem(JOBS_KEY, JSON.stringify(jobs.slice(0, 20)));
-      localStorage.setItem(ACTIVE_KEY, job.id);
+      if (!STOPPED.has(job.status)) localStorage.setItem(ACTIVE_KEY, job.id);
     } catch {}
   }
 
@@ -281,12 +282,22 @@
     return `${state.toUpperCase()} · match assessment ${score}/100\n${issues}`;
   }
 
+  function latestAttempt(job) {
+    const attempts = Array.isArray(job.attempts) ? job.attempts : [];
+    return attempts.length ? attempts[attempts.length - 1] : null;
+  }
+
+  function attemptUrl(job, attempt) {
+    return `/openai/attempt?id=${encodeURIComponent(job.id)}&fraction=${encodeURIComponent(attempt.target_fraction)}&attempt=${encodeURIComponent(attempt.attempt)}`;
+  }
+
   function renderJob(job) {
     currentJob = job;
     rememberJob(job);
     jobBox.hidden = false;
+    jobBox.innerHTML = "";
     const attempts = Array.isArray(job.attempts) ? job.attempts : [];
-    const latest = attempts[attempts.length - 1];
+    const latest = latestAttempt(job);
     const accepted = Array.isArray(job.accepted) ? job.accepted : [];
     const lines = [
       `Job ID: ${job.id}`,
@@ -298,8 +309,38 @@
       `Accepted generated frames: ${accepted.length}`,
     ].filter(Boolean);
 
-    if (latest?.audit) lines.push("", formatAudit(latest.audit));
-    jobBox.textContent = lines.join("\n");
+    if (latest?.audit) {
+      lines.push(
+        "",
+        `Latest attempt: target t=${Number(latest.target_fraction).toFixed(3)} · attempt ${latest.attempt}`,
+        `Attempt cost: $${Number(latest.actual_cost_usd || latest.estimated_cost_usd || 0).toFixed(4)}`,
+        formatAudit(latest.audit),
+      );
+    }
+
+    const text = document.createElement("div");
+    text.textContent = lines.join("\n");
+    jobBox.appendChild(text);
+
+    if (latest) {
+      const preview = document.createElement("img");
+      preview.src = attemptUrl(job, latest);
+      preview.alt = `OpenAI interpolation attempt ${latest.attempt}`;
+      preview.style.display = "block";
+      preview.style.width = "min(360px, 100%)";
+      preview.style.maxHeight = "420px";
+      preview.style.objectFit = "contain";
+      preview.style.marginTop = "10px";
+      preview.style.borderRadius = "10px";
+      preview.style.background = "repeating-conic-gradient(color-mix(in srgb, CanvasText 8%, Canvas) 0 25%, Canvas 0 50%) 0/18px 18px";
+      jobBox.appendChild(preview);
+    }
+
+    const actions = document.createElement("div");
+    actions.style.display = "flex";
+    actions.style.flexWrap = "wrap";
+    actions.style.gap = "8px";
+    actions.style.marginTop = "10px";
 
     const copy = document.createElement("button");
     copy.type = "button";
@@ -309,23 +350,34 @@
       try { await navigator.clipboard.writeText(job.id); }
       catch { restoreId.value = job.id; restoreId.focus(); restoreId.select(); }
     });
-    jobBox.appendChild(document.createElement("br"));
-    jobBox.appendChild(copy);
+    actions.appendChild(copy);
 
     if (job.status === "done" && accepted.length) {
       const insert = document.createElement("button");
       insert.type = "button";
       insert.className = "small-button";
-      insert.style.marginLeft = "8px";
       insert.textContent = "Insert accepted frames into animation";
-      insert.addEventListener("click", () => insertResults(job));
-      jobBox.appendChild(insert);
+      insert.addEventListener("click", () => insertResults(job).catch(error => {
+        statusBox.textContent = `Could not insert generated frames: ${error.message}`;
+      }));
+      actions.appendChild(insert);
     }
 
-    reviewBox.hidden = !["needs_review", "interrupted", "budget_wait"].includes(job.status);
-    retryButton.textContent = job.status === "interrupted" ? "Resume job" : "Learn from this attempt and try again";
+    jobBox.appendChild(actions);
 
-    if (["done", "error", "cancelled"].includes(job.status)) clearActive(job.id);
+    const canReview = Boolean(latest) && STOPPED.has(job.status) && !["error", "cancelled"].includes(job.status);
+    reviewBox.hidden = !canReview;
+    if (canReview) {
+      if (job.status === "done" && latest?.audit?.acceptable) {
+        retryButton.textContent = "Reject this result, learn from feedback and try again";
+      } else if (job.status === "interrupted") {
+        retryButton.textContent = "Resume job";
+      } else {
+        retryButton.textContent = "Learn from this attempt and try again";
+      }
+    }
+
+    if (STOPPED.has(job.status)) clearActive(job.id);
   }
 
   async function insertResults(job) {
@@ -366,7 +418,7 @@
       try {
         const job = await jsonRequest(`/openai/job?id=${encodeURIComponent(jobId)}`);
         renderJob(job);
-        if (["done", "error", "needs_review", "budget_wait", "interrupted", "cancelled"].includes(job.status)) return;
+        if (STOPPED.has(job.status)) return;
       } catch (error) {
         statusBox.textContent = `The server-side job should continue. Reconnecting: ${error.message}`;
       }
@@ -410,6 +462,7 @@
 
   async function retryJob() {
     if (!currentJob?.id) return;
+    const latest = latestAttempt(currentJob);
     retryButton.disabled = true;
     try {
       const job = await jsonRequest("/openai/retry", {
@@ -417,6 +470,7 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           job_id: currentJob.id,
+          target_fraction: latest?.target_fraction ?? currentJob.pending_target ?? null,
           feedback: feedback.value.trim(),
           max_spend_usd: Math.max(0, Number(maxSpend.value || 0)),
         }),
@@ -425,7 +479,7 @@
       renderJob(job);
       monitor(job.id, true);
     } catch (error) {
-      statusBox.textContent = `Could not resume job: ${error.message}`;
+      statusBox.textContent = `Could not retry job: ${error.message}`;
     } finally {
       retryButton.disabled = false;
     }
@@ -441,7 +495,7 @@
     try {
       const job = await jsonRequest(`/openai/job?id=${encodeURIComponent(id)}`);
       renderJob(job);
-      if (!["done", "error", "needs_review", "budget_wait", "interrupted", "cancelled"].includes(job.status)) monitor(job.id, true);
+      if (!STOPPED.has(job.status)) monitor(job.id, true);
     } catch (error) {
       statusBox.textContent = `Could not restore job: ${error.message}`;
     }
@@ -462,7 +516,7 @@
   if (strip) new MutationObserver(updatePairOptions).observe(strip, { childList: true });
 
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden && currentJob?.id && !["done", "error", "needs_review", "budget_wait", "interrupted", "cancelled"].includes(currentJob.status)) {
+    if (!document.hidden && currentJob?.id && !STOPPED.has(currentJob.status)) {
       monitor(currentJob.id, true);
     }
   });
