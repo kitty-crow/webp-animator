@@ -7,20 +7,51 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import app as legacy
-from openai_interrogator import ACTIVE_STATES, OpenAIJobManager
+from openai_batch import OpenAIBatchManager
+from openai_interrogator import ACTIVE_STATES, OpenAIJobManager, make_contact_sheet
 
 ROOT = Path(__file__).resolve().parent
-OPENAI = OpenAIJobManager(ROOT)
+
+
+class FullContextJobManager(OpenAIJobManager):
+    """Use every known frame in the optional sequence-context timeline.
+
+    Immediate temporal anchors are still sent separately at full resolution. The whole
+    animation is represented as a labelled timeline image so the planner/auditor can
+    reason about cadence, direction and loop phase without silently sampling frames.
+    """
+
+    def _context_sheet(self, job):
+        if not job["request"].get("whole_sequence_context", True):
+            return None
+        paths = [self._source_path(job, index) for index in range(len(job["sources"]))]
+        labels = [f"Frame {index + 1}" for index in range(len(paths))]
+        for accepted in sorted(job.get("accepted", []), key=lambda item: float(item["target_fraction"])):
+            paths.append(self._job_dir(job["id"]) / accepted["path"])
+            labels.append(f"Accepted gap frame t={float(accepted['target_fraction']):.3f}")
+        return make_contact_sheet(
+            paths,
+            labels,
+            self._job_dir(job["id"]) / "context" / "sequence.png",
+            max_frames=max(24, len(paths)),
+        )
+
+
+OPENAI = FullContextJobManager(ROOT)
+BATCH = OpenAIBatchManager(ROOT, OPENAI)
 UI_FRAGMENT = (ROOT / "openai_ui" / "fragment.html").read_text(encoding="utf-8")
 UI_SCRIPT = (ROOT / "openai_ui" / "interrogator.js").read_bytes()
 
 
 def enhanced_index() -> bytes:
     html = legacy.INDEX_HTML.decode("utf-8")
-    marker = '<button id="submitButton" type="submit">Generate WebP</button>'
+    # The semantic interpolation stage belongs before the ordinary alignment/RIFE
+    # controls in the page flow. Accepted OpenAI frames are inserted into the source
+    # sequence first, then the user can use the normal RIFE pass for cheap smoothing.
+    marker = '      <div class="grid">'
     if marker not in html:
-        raise RuntimeError("Could not find WebP Animator submit button for OpenAI UI injection.")
-    html = html.replace(marker, UI_FRAGMENT + "\n\n      " + marker, 1)
+        raise RuntimeError("Could not find WebP Animator settings grid for OpenAI UI injection.")
+    html = html.replace(marker, UI_FRAGMENT + "\n\n" + marker, 1)
     html = html.replace("</body>", '  <script src="/openai-ui.js"></script>\n</body>', 1)
     return html.encode("utf-8")
 
@@ -119,8 +150,29 @@ def reopen_for_retry(
     return OPENAI.public(job)
 
 
+def estimate_request(payload: dict, frame_count: int, width: int, height: int) -> dict:
+    scope = str(payload.get("scope", "pair")).lower()
+    base_payload = dict(payload)
+    if scope in {"range", "all"}:
+        # The child estimator validates a single ordinary pair. Batch multiplication is
+        # applied afterwards, giving one coherent worst-case figure to the user.
+        base_payload["left_index"] = 0
+        base_payload["right_index"] = 1
+        base_payload["loop_closure"] = False
+    estimate = OPENAI.estimate(base_payload, frame_count, width, height)
+    segments = OpenAIBatchManager.segment_count(payload, frame_count) if scope in {"range", "all"} else 1
+    if segments > 1:
+        estimate["segments"] = segments
+        estimate["frames"] = int(estimate.get("frames", 1)) * segments
+        estimate["attempts"] = int(estimate.get("attempts", 1)) * segments
+        estimate["maximum"] = float(estimate.get("maximum", 0.0)) * segments
+    else:
+        estimate["segments"] = 1
+    return estimate
+
+
 class Handler(legacy.Handler):
-    server_version = "AnimAlignWebP/3.0-openai"
+    server_version = "AnimAlignWebP/3.1-openai"
 
     def read_json_body(self, max_bytes: int = 1024 * 1024):
         try:
@@ -150,12 +202,18 @@ class Handler(legacy.Handler):
 
         if path == "/openai-status":
             OPENAI.cleanup()
+            BATCH.cleanup()
             self.send_json(200, OPENAI.bridge.status())
             return
 
         if path == "/openai/job":
             OPENAI.cleanup()
+            BATCH.cleanup()
             job_id = query.get("id", [""])[0]
+            batch = BATCH.get(job_id)
+            if batch:
+                self.send_json(200, BATCH.public(batch))
+                return
             job = OPENAI.get(job_id)
             if not job:
                 self.send_json(404, {"error": "Unknown OpenAI interpolation job."})
@@ -213,7 +271,7 @@ class Handler(legacy.Handler):
                 frame_count = max(2, int(payload.pop("frame_count", 2)))
                 width = max(1, int(payload.pop("width", 1024)))
                 height = max(1, int(payload.pop("height", 1024)))
-                self.send_json(200, OPENAI.estimate(payload, frame_count, width, height))
+                self.send_json(200, estimate_request(payload, frame_count, width, height))
             except Exception as exc:
                 self.send_json(400, {"error": str(exc)})
             return
@@ -229,7 +287,12 @@ class Handler(legacy.Handler):
                 request = json.loads(raw_request)
                 if not isinstance(request, dict):
                     raise ValueError("openai_request must be a JSON object.")
-                job = OPENAI.create(selected, request)
+                scope = str(request.get("scope", "pair")).lower()
+                if scope in {"range", "all"}:
+                    job = BATCH.create(selected, request)
+                else:
+                    request["scope"] = "pair"
+                    job = OPENAI.create(selected, request)
                 self.send_json(202, job)
             except OverflowError as exc:
                 self.send_json(413, {"error": str(exc)})
@@ -243,13 +306,23 @@ class Handler(legacy.Handler):
                 job_id = str(payload.get("job_id", ""))
                 feedback = str(payload.get("feedback", ""))
                 max_spend = payload.get("max_spend_usd")
+                max_spend_value = None if max_spend is None else float(max_spend)
                 target = payload.get("target_fraction")
-                result = reopen_for_retry(
-                    job_id,
-                    feedback,
-                    None if max_spend is None else float(max_spend),
-                    None if target is None else float(target),
-                )
+                target_value = None if target is None else float(target)
+
+                batch = BATCH.get(job_id)
+                if batch:
+                    child_id = BATCH.current_child(job_id)
+                    if child_id:
+                        public_batch = BATCH.public(batch)
+                        spent = float(public_batch.get("spent_usd", 0.0))
+                        remaining = None
+                        if max_spend_value is not None and max_spend_value > 0:
+                            remaining = max(0.0, max_spend_value - spent)
+                        reopen_for_retry(child_id, feedback, remaining, target_value)
+                    result = BATCH.resume(job_id, max_spend_value)
+                else:
+                    result = reopen_for_retry(job_id, feedback, max_spend_value, target_value)
                 self.send_json(202, result)
             except KeyError:
                 self.send_json(404, {"error": "Unknown OpenAI interpolation job."})
@@ -261,7 +334,10 @@ class Handler(legacy.Handler):
             try:
                 payload = self.read_json_body()
                 job_id = str(payload.get("job_id", ""))
-                OPENAI.delete(job_id)
+                if BATCH.get(job_id):
+                    BATCH.delete(job_id)
+                else:
+                    OPENAI.delete(job_id)
                 self.send_json(200, {"deleted": True, "job_id": job_id})
             except Exception as exc:
                 self.send_json(400, {"error": str(exc)})
