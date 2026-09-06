@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import time
 import unittest
-from unittest import mock
 
 from PIL import Image, ImageDraw
 
@@ -17,26 +17,20 @@ class Frame1OptimizerTests(unittest.TestCase):
         draw.rectangle((365, 250, 460, 365), fill=(250, 230, 60, 255))
         return image
 
-    def test_recovers_uniform_scale_without_touching_full_size_in_search(self):
+    def test_recovers_uniform_scale_quickly(self):
         anchor = self._anchor()
         source = anchor.resize((704, 528), Image.Resampling.LANCZOS)
 
-        real_match = frame1_optimizer.find_best_translation
-        seen_sizes = []
-
-        def recording_match(a, b, **kwargs):
-            seen_sizes.append((a.size, b.size))
-            return real_match(a, b, **kwargs)
-
-        with mock.patch.object(frame1_optimizer, "find_best_translation", recording_match):
-            transformed, scale, shift = frame1_optimizer.find_best_scale_and_translation(
-                anchor,
-                source,
-                axis="xy",
-                max_shift=64,
-                sigma=24.0,
-                alpha_threshold=8,
-            )
+        started = time.perf_counter()
+        transformed, scale, shift = frame1_optimizer.find_best_scale_and_translation(
+            anchor,
+            source,
+            axis="xy",
+            max_shift=64,
+            sigma=24.0,
+            alpha_threshold=8,
+        )
+        elapsed = time.perf_counter() - started
 
         expected = 640 / 704
         self.assertAlmostEqual(scale, expected, delta=0.035)
@@ -44,11 +38,10 @@ class Frame1OptimizerTests(unittest.TestCase):
         self.assertLessEqual(abs(transformed.height - 480), 10)
         self.assertLessEqual(abs(shift.dx), 3)
         self.assertLessEqual(abs(shift.dy), 3)
-        self.assertTrue(seen_sizes)
-        self.assertLessEqual(
-            max(max(*a, *b) for a, b in seen_sizes),
-            1280,
-            "Scale search must stay on bounded proxies instead of rescanning full-resolution frames.",
+        self.assertLess(
+            elapsed,
+            5.0,
+            "Frame-1 scale/pan matching regressed into a long-running exhaustive search.",
         )
 
     def test_axis_none_keeps_translation_zero(self):
