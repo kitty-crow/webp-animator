@@ -4,8 +4,6 @@ __pycache__/
 venv/
 .rife-venv/
 third_party/
+.webp-jobs/
 .DS_Store
 .env
-.openai-jobs/
-.openai-batches/
-openai_bridge/node_modules/
