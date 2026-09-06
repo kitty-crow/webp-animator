@@ -23,6 +23,17 @@ const IMAGE_OUTPUT_ESTIMATE = {
 
 const reasoningEfforts = new Set(["none", "low", "medium", "high", "xhigh", "max"]);
 const imageQualities = new Set(["low", "medium", "high"]);
+const transientImageStatuses = new Set([429, 500, 502, 503, 504]);
+
+class BridgeError extends Error {
+  constructor(message, statusCode = 500, kind = "bridge_error", details = null) {
+    super(message);
+    this.name = "BridgeError";
+    this.statusCode = statusCode;
+    this.kind = kind;
+    this.details = details;
+  }
+}
 
 function errorText(error) {
   if (error instanceof Error) return error.message;
@@ -33,6 +44,10 @@ function clamp(value, minimum, maximum) {
   const numberValue = Number(value);
   if (!Number.isFinite(numberValue)) return minimum;
   return Math.max(minimum, Math.min(maximum, numberValue));
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function dataUrl(base64, mime = "image/png") {
@@ -279,9 +294,6 @@ function normaliseGenerationSize(requested) {
   width *= scale;
   height *= scale;
 
-  // GPT Image requires both output edges to be divisible by 16. Round down so a
-  // source such as 2120x2736 becomes 2112x2736 instead of being rejected. Python
-  // restores the generated PNG to the exact source canvas after the API call.
   width = Math.max(16, Math.floor(width / 16) * 16);
   height = Math.max(16, Math.floor(height / 16) * 16);
   return { width, height };
@@ -292,6 +304,110 @@ function pngDimensions(base64) {
   const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
   if (buffer.length < 24 || !buffer.subarray(0, 8).equals(signature)) return null;
   return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+}
+
+function parseOpenAIError(response, raw) {
+  let parsed = null;
+  try { parsed = JSON.parse(raw); } catch {}
+  const error = parsed?.error || {};
+  return {
+    status: response.status,
+    message: String(error.message || raw || `HTTP ${response.status}`).slice(0, 1600),
+    type: error.type || null,
+    code: error.code || null,
+    moderation_details: error.moderation_details || null,
+    request_id: response.headers.get("x-request-id") || response.headers.get("request-id") || null,
+  };
+}
+
+function moderationBlocked(details) {
+  if (!details) return false;
+  if (details.code === "moderation_blocked") return true;
+  if (details.type === "image_generation_user_error" && details.moderation_details) return true;
+  return false;
+}
+
+function imageEditForm({ model, quality, prompt, refs, apiSize, transparent }) {
+  const form = new FormData();
+  form.append("model", model);
+  form.append("prompt", prompt);
+  form.append("quality", quality);
+  form.append("output_format", "png");
+  form.append("size", `${apiSize.width}x${apiSize.height}`);
+  if (transparent !== false) form.append("background", "transparent");
+  refs.forEach((ref, index) => {
+    form.append("image[]", b64ToBlob(ref.image_b64, ref.mime || "image/png"), `reference-${index + 1}.png`);
+  });
+  return form;
+}
+
+async function callImageEdit({ model, quality, prompt, refs, apiSize, transparent }) {
+  let lastTransportError = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    let response;
+    try {
+      response = await fetch(`${BASE}/images/edits`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${API_KEY}` },
+        body: imageEditForm({ model, quality, prompt, refs, apiSize, transparent }),
+      });
+    } catch (error) {
+      lastTransportError = error;
+      if (attempt < 2) {
+        await sleep(350 * (2 ** attempt));
+        continue;
+      }
+      throw new BridgeError(`Could not reach OpenAI image edit endpoint: ${errorText(error)}`, 502, "image_transport_error");
+    }
+
+    const raw = await response.text();
+    if (response.ok) {
+      let value;
+      try { value = JSON.parse(raw); }
+      catch { throw new BridgeError("OpenAI image edit returned invalid JSON.", 502, "invalid_image_response"); }
+      return value;
+    }
+
+    const details = parseOpenAIError(response, raw);
+    if (moderationBlocked(details)) {
+      throw new BridgeError(
+        `OpenAI image safety system blocked this edit${details.request_id ? ` (request ${details.request_id})` : ""}.`,
+        422,
+        "moderation_blocked",
+        details,
+      );
+    }
+
+    if (transientImageStatuses.has(response.status) && attempt < 2) {
+      const retryAfter = Number(response.headers.get("retry-after") || 0);
+      await sleep(retryAfter > 0 ? retryAfter * 1000 : 400 * (2 ** attempt));
+      continue;
+    }
+
+    throw new BridgeError(
+      `OpenAI image edit failed (${response.status}): ${details.message}`,
+      response.status >= 500 ? 502 : 400,
+      "image_api_error",
+      details,
+    );
+  }
+  throw new BridgeError(`OpenAI image edit transport failed: ${errorText(lastTransportError)}`, 502, "image_transport_error");
+}
+
+function extractGeneratedImage(value) {
+  const item = Array.isArray(value.data) ? value.data[0] : null;
+  return { item, imageB64: item?.b64_json || item?.b64 || null };
+}
+
+async function materialiseGeneratedImage(value) {
+  let { item, imageB64 } = extractGeneratedImage(value);
+  if (!imageB64 && item?.url) {
+    const imageResponse = await fetch(item.url);
+    if (!imageResponse.ok) throw new BridgeError(`Could not download generated image (${imageResponse.status}).`, 502, "image_download_error");
+    imageB64 = Buffer.from(await imageResponse.arrayBuffer()).toString("base64");
+  }
+  if (!imageB64) throw new BridgeError("OpenAI returned no generated image data.", 502, "missing_image_data");
+  return imageB64;
 }
 
 async function runGenerate(payload) {
@@ -307,44 +423,64 @@ async function runGenerate(payload) {
   const roleInstruction = refs.length >= 3
     ? "Reference image 1 is the earlier temporal anchor. Reference image 2 is the later temporal anchor. Reference image 3 is a previous rejected generation: use it only as negative/corrective evidence, preserve aspects explicitly identified as good, and do not copy its diagnosed failures."
     : "Reference image 1 is the earlier temporal anchor. Reference image 2 is the later temporal anchor. Treat both as hard temporal constraints, not loose style references.";
-  const prompt = `${roleInstruction}\n\n${rawPrompt}`;
+  const preservationInstruction = "Preserve the existing presentation of all depicted subjects and objects. If human-like subjects are present, preserve their existing age presentation, anatomy, clothing coverage, and neutral/non-sexual presentation. Do not introduce exposure, sexualisation, or unrelated changes.";
+  const prompt = `${roleInstruction}\n\n${preservationInstruction}\n\n${rawPrompt}`;
   const requested = parseRequestedSize(payload.size);
   if (!requested) throw new Error("An exact output size in WIDTHxHEIGHT form is required for animation interpolation.");
   const apiSize = normaliseGenerationSize(requested);
 
-  const form = new FormData();
-  form.append("model", model);
-  form.append("prompt", prompt);
-  form.append("quality", quality);
-  form.append("output_format", "png");
-  form.append("size", `${apiSize.width}x${apiSize.height}`);
-  if (payload.transparent !== false) form.append("background", "transparent");
-  refs.forEach((ref, index) => {
-    form.append("image[]", b64ToBlob(ref.image_b64, ref.mime || "image/png"), `reference-${index + 1}.png`);
-  });
+  let value;
+  let moderationRecovery = false;
+  let firstModeration = null;
+  try {
+    value = await callImageEdit({ model, quality, prompt, refs, apiSize, transparent: payload.transparent });
+  } catch (error) {
+    if (!(error instanceof BridgeError) || error.kind !== "moderation_blocked") throw error;
+    firstModeration = error.details;
+    moderationRecovery = true;
 
-  const response = await fetch(`${BASE}/images/edits`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${API_KEY}` },
-    body: form,
-  });
-  const raw = await response.text();
-  if (!response.ok) throw new Error(`OpenAI image edit failed (${response.status}): ${raw.slice(0, 1200)}`);
-  const value = JSON.parse(raw);
-  const item = Array.isArray(value.data) ? value.data[0] : null;
-  let imageB64 = item?.b64_json || item?.b64 || null;
-  if (!imageB64 && item?.url) {
-    const imageResponse = await fetch(item.url);
-    if (!imageResponse.ok) throw new Error(`Could not download generated image (${imageResponse.status}).`);
-    imageB64 = Buffer.from(await imageResponse.arrayBuffer()).toString("base64");
+    // A model-generated semantic plan can occasionally cause a benign interpolation
+    // to be rejected even when the source animation itself is ordinary. Retry once
+    // with only the two immutable temporal anchors and a literal, semantics-free edit
+    // instruction. This does not relax safety; it explicitly asks the model to retain
+    // the existing neutral presentation and make only the minimal temporal change.
+    const fallbackPrompt = String(payload.safety_fallback_instruction || `
+Create exactly one conservative temporal in-between frame from reference image 1 to reference image 2 at the requested interpolation position.
+Treat the two reference images as immutable visual truth. Preserve the same subject/object identity, apparent age presentation, anatomy/shape, clothing or surface coverage, style, colours, lighting, framing, background/transparency and all unrelated details.
+Change only the minimum visible position, articulation, deformation or occlusion needed to lie temporally between the two anchors.
+Keep the result neutral and non-sexual. Do not add or remove clothing or surface coverage, expose additional body area, alter proportions, redesign the subject, or invent decorative details.
+`).trim();
+    try {
+      value = await callImageEdit({
+        model,
+        quality,
+        prompt: fallbackPrompt,
+        refs: refs.slice(0, 2),
+        apiSize,
+        transparent: payload.transparent,
+      });
+    } catch (fallbackError) {
+      if (fallbackError instanceof BridgeError && fallbackError.kind === "moderation_blocked") {
+        throw new BridgeError(
+          "OpenAI image safety blocked both the planned interpolation and the conservative safety-preserving retry. The job can be resumed after changing the guidance; no unsafe bypass is attempted.",
+          422,
+          "moderation_blocked",
+          { first: firstModeration, second: fallbackError.details },
+        );
+      }
+      throw fallbackError;
+    }
   }
-  if (!imageB64) throw new Error("OpenAI returned no generated image data.");
 
+  const imageB64 = await materialiseGeneratedImage(value);
   const dimensions = pngDimensions(imageB64);
-  if (!dimensions) throw new Error("OpenAI image edit did not return a valid PNG image.");
+  if (!dimensions) throw new BridgeError("OpenAI image edit did not return a valid PNG image.", 502, "invalid_image_data");
   if (dimensions.width !== apiSize.width || dimensions.height !== apiSize.height) {
-    throw new Error(
+    throw new BridgeError(
       `OpenAI returned ${dimensions.width}x${dimensions.height}, but the valid API request was ${apiSize.width}x${apiSize.height}.`,
+      502,
+      "unexpected_image_size",
+      { expected: apiSize, actual: dimensions },
     );
   }
 
@@ -360,6 +496,8 @@ async function runGenerate(payload) {
     usage: value.usage || null,
     model,
     quality,
+    moderation_recovery: moderationRecovery,
+    moderation_recovery_details: moderationRecovery ? firstModeration : null,
   };
 }
 
@@ -457,7 +595,7 @@ const server = createServer(async (request, response) => {
         key_configured: Boolean(API_KEY),
         openai_schema: true,
         bridge: "openai-interrogator",
-        version: 3,
+        version: 4,
       });
       return;
     }
@@ -487,7 +625,12 @@ const server = createServer(async (request, response) => {
     sendNode(response, result);
   } catch (error) {
     console.error(error);
-    sendNode(response, { error: errorText(error) }, 500);
+    const status = Number(error?.statusCode || 500);
+    sendNode(response, {
+      error: errorText(error),
+      kind: error?.kind || "bridge_error",
+      details: error?.details || null,
+    }, status >= 400 && status <= 599 ? status : 500);
   }
 });
 
