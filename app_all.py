@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import json
 import shutil
-import tempfile
 import threading
+import uuid
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -13,6 +13,7 @@ import app as legacy
 import advanced_pipeline
 import gpu_match
 import temporal_timing
+import temporal_v2
 from engine_paths import engine_status
 from frame1_optimizer import find_best_scale_and_translation as fast_find_best_scale_and_translation
 from global_jobs import GlobalJobStore
@@ -89,13 +90,12 @@ try:
 except Exception:
     GPU_GEOMETRY = False
 
-# Smart recursive filling may generate an uneven set of temporal positions. Keep
-# the original interval timing exactly instead of redistributing those frames evenly.
+# Keep the old module's timing patch for backwards-compatible direct imports/tests.
 temporal_timing.install(advanced_pipeline)
 
 
 def _advanced_process_job(job_id: str, paths: list[Path], settings: dict):
-    return advanced_pipeline.process_job(legacy, job_id, paths, settings)
+    return temporal_v2.process_job(legacy, job_id, paths, settings)
 
 
 legacy.process_job = _advanced_process_job
@@ -125,7 +125,11 @@ def _settings_from_fields(fields: dict[str, str]) -> dict:
     if frame_generator not in {"none", "eden", "speed"}:
         frame_generator = "none"
 
-    return {
+    loop_analysis = str(fields.get("loop_analysis", "off")).strip().lower()
+    if loop_analysis not in {"off", "alongside", "only"}:
+        loop_analysis = "off"
+
+    settings = {
         "axis": axis,
         "max_shift": legacy.clamp_int(fields.get("max_shift"), 64, 0, 2000),
         "duration": legacy.clamp_int(fields.get("duration"), 100, 1, 60000),
@@ -142,7 +146,16 @@ def _settings_from_fields(fields: dict[str, str]) -> dict:
         "smart_missing": fields.get("smart_missing") == "on",
         "missing_threshold": legacy.clamp_float(fields.get("missing_threshold"), 12.0, 0.0, 100.0),
         "target_gaps": str(fields.get("target_gaps", "")).strip(),
+        "loop_analysis": loop_analysis,
     }
+    # Saved jobs from before this control existed retain the established
+    # interpolation-density behaviour instead of silently becoming one-frame fills.
+    if "frames_to_fill" in fields:
+        try:
+            settings["frames_to_fill"] = max(0, int(str(fields.get("frames_to_fill", "1")).strip()))
+        except ValueError:
+            settings["frames_to_fill"] = 1
+    return settings
 
 
 def _run_global_render(job_id: str, paths: list[Path], settings: dict) -> None:
@@ -164,6 +177,69 @@ def _start_global_render(job_id: str, paths: list[Path], settings: dict) -> None
         args=(job_id, paths, settings),
         daemon=True,
         name=f"webp-global-{job_id[:8]}",
+    ).start()
+
+
+def _analysis_update(job_id: str, analysis_id: str, **changes):
+    job = GLOBAL.get(job_id)
+    if not job:
+        return None
+    state = dict(job.get("analysis") or {})
+    if state.get("id") and state.get("id") != analysis_id:
+        return None
+    state.update(changes)
+    state["id"] = analysis_id
+    GLOBAL.update(job_id, analysis=state)
+    return state
+
+
+def _run_analysis(job_id: str, analysis_id: str, paths: list[Path], settings: dict) -> None:
+    _analysis_update(
+        job_id,
+        analysis_id,
+        status="running",
+        progress=1,
+        message="Server-side analysis started",
+        error=None,
+    )
+
+    def report(value, message):
+        _analysis_update(
+            job_id,
+            analysis_id,
+            status="running",
+            progress=max(0, min(100, int(value))),
+            message=str(message),
+            error=None,
+        )
+
+    try:
+        result = temporal_v2.analyse_paths(legacy, paths, settings, progress=report)
+        _analysis_update(
+            job_id,
+            analysis_id,
+            status="done",
+            progress=100,
+            message="Analysis complete",
+            error=None,
+            result=result,
+        )
+    except Exception as exc:
+        _analysis_update(
+            job_id,
+            analysis_id,
+            status="error",
+            message=str(exc),
+            error=str(exc),
+        )
+
+
+def _start_analysis(job_id: str, analysis_id: str, paths: list[Path], settings: dict) -> None:
+    threading.Thread(
+        target=_run_analysis,
+        args=(job_id, analysis_id, paths, settings),
+        daemon=True,
+        name=f"webp-analysis-{job_id[:8]}-{analysis_id[:6]}",
     ).start()
 
 
@@ -191,8 +267,38 @@ def _resume_interrupted_jobs() -> None:
         _start_global_render(str(job["id"]), paths, settings)
 
 
+def _resume_interrupted_analyses() -> None:
+    for manifest in GLOBAL.root.glob("*/job.json"):
+        try:
+            job = json.loads(manifest.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        analysis = job.get("analysis")
+        if not isinstance(analysis, dict) or str(analysis.get("status", "")) not in {"queued", "running"}:
+            continue
+        settings = analysis.get("settings") or job.get("settings")
+        sources = list(job.get("sources", []))
+        if not isinstance(settings, dict) or not sources:
+            continue
+        job_id = str(job.get("id", ""))
+        paths = [GLOBAL.job_dir(job_id) / str(item.get("path", "")) for item in sources]
+        if not all(path.is_file() for path in paths):
+            continue
+        analysis_id = str(analysis.get("id") or uuid.uuid4().hex)
+        _analysis_update(
+            job_id,
+            analysis_id,
+            status="queued",
+            progress=0,
+            message="Resuming persisted analysis after server restart",
+            error=None,
+            settings=settings,
+        )
+        _start_analysis(job_id, analysis_id, paths, settings)
+
+
 class Handler(legacy.Handler):
-    server_version = "AnimAlignWebP/6.0-multiengine"
+    server_version = "AnimAlignWebP/6.1-temporal-jobs"
 
     def read_json_body(self, max_bytes: int = 1024 * 1024) -> dict:
         try:
@@ -239,7 +345,33 @@ class Handler(legacy.Handler):
             if not job:
                 self.send_json(404, {"error": "Unknown global job."})
                 return
-            self.send_json(200, GLOBAL.public(job))
+            public = GLOBAL.public(job)
+            analysis = job.get("analysis")
+            if isinstance(analysis, dict):
+                public["analysis"] = {
+                    "id": analysis.get("id"),
+                    "status": analysis.get("status"),
+                    "progress": analysis.get("progress", 0),
+                    "message": analysis.get("message", ""),
+                }
+            self.send_json(200, public)
+            return
+
+        if path == "/analysis":
+            job_id = query.get("id", [""])[0]
+            requested_analysis = query.get("analysis_id", [""])[0]
+            job = GLOBAL.get(job_id)
+            if not job:
+                self.send_json(404, {"error": "Unknown global job."})
+                return
+            analysis = job.get("analysis")
+            if not isinstance(analysis, dict):
+                self.send_json(404, {"error": "No analysis exists for this job."})
+                return
+            if requested_analysis and str(analysis.get("id", "")) != requested_analysis:
+                self.send_json(404, {"error": "That analysis run is no longer current."})
+                return
+            self.send_json(200, analysis)
             return
 
         if path == "/job/source":
@@ -330,16 +462,31 @@ class Handler(legacy.Handler):
             try:
                 fields, selected = self._parse_frame_upload()
                 settings = _settings_from_fields(fields)
-                with tempfile.TemporaryDirectory(prefix="webp_analyse_") as temporary:
-                    root = Path(temporary)
-                    paths = []
-                    for index, (filename, payload) in enumerate(selected):
-                        suffix = Path(filename).suffix.lower()
-                        frame_path = root / f"{index:06d}{suffix}"
-                        frame_path.write_bytes(payload)
-                        paths.append(frame_path)
-                    result = advanced_pipeline.analyse_paths(legacy, paths, settings)
-                self.send_json(200, result)
+                requested = str(fields.get("global_job_id", "")).strip().lower()
+                job_id = requested or GLOBAL.new_id()
+                _, paths = GLOBAL.save_sources(job_id, selected, settings)
+                analysis_id = uuid.uuid4().hex
+                GLOBAL.update(
+                    job_id,
+                    analysis={
+                        "id": analysis_id,
+                        "status": "queued",
+                        "progress": 0,
+                        "message": "Analysis upload received and persisted",
+                        "error": None,
+                        "settings": settings,
+                        "result": None,
+                    },
+                )
+                _start_analysis(job_id, analysis_id, paths, settings)
+                self.send_json(
+                    202,
+                    {
+                        "job_id": job_id,
+                        "global_job_id": job_id,
+                        "analysis_id": analysis_id,
+                    },
+                )
             except OverflowError as exc:
                 self.send_text(413, str(exc))
             except Exception as exc:
@@ -366,6 +513,7 @@ class Handler(legacy.Handler):
 
 def main():
     _resume_interrupted_jobs()
+    _resume_interrupted_analyses()
     statuses = engine_status(legacy)
     server = ThreadingHTTPServer((legacy.HOST, legacy.PORT), Handler)
     print(f"WebP Animator persistent server listening on http://{legacy.HOST}:{legacy.PORT}")
@@ -375,6 +523,7 @@ def main():
     for name in ("rife", "amt", "eden", "speed"):
         print(f"{name.upper():<12} {'ready' if statuses.get(name, {}).get('ready') else 'not installed'}")
     print("Global jobs:  durable with no automatic expiry")
+    print("Analysis:     durable background jobs with reconnectable progress")
     print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()
