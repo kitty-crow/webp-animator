@@ -29,23 +29,27 @@ class CancellableEnhancedOpenAIJobManager(EnhancedOpenAIJobManager):
         return bool(job and (job.get("cancel_requested") or job.get("status") == "cancelled"))
 
     def cancel(self, job_id: str) -> dict[str, Any]:
+        # Do NOT acquire the per-job worker lock here. The worker intentionally holds
+        # that lock for its entire lifetime, including long paid HTTP requests. Taking
+        # it here would make the Stop button wait until the very work it is supposed to
+        # stop has already finished. Manifest I/O has its own lock, so cancellation can
+        # be persisted immediately while the worker is in flight.
         with self._cancel_lock:
             self._cancelled_ids.add(job_id)
-        with self._lock_for(job_id):
-            job = self.get(job_id)
-            if not job:
-                raise KeyError(job_id)
-            job["cancel_requested"] = True
-            job["status"] = "cancelled"
-            job["stage"] = "cancelled"
-            job["estimated_next_usd"] = 0.0
-            job["error"] = None
-            job["message"] = (
-                "Stopped by user. No further OpenAI stages or automatic retries will be started. "
-                "A request that was already in flight when Stop was pressed may still finish remotely."
-            )
-            self._save(job)
-            return self.public(job)
+        job = self.get(job_id)
+        if not job:
+            raise KeyError(job_id)
+        job["cancel_requested"] = True
+        job["status"] = "cancelled"
+        job["stage"] = "cancelled"
+        job["estimated_next_usd"] = 0.0
+        job["error"] = None
+        job["message"] = (
+            "Stopped by user. No further OpenAI stages or automatic retries will be started. "
+            "A request that was already in flight when Stop was pressed may still finish remotely."
+        )
+        self._save(job)
+        return self.public(job)
 
     def _update(self, job_id: str, **changes: Any) -> dict[str, Any]:
         current = self.get(job_id)
