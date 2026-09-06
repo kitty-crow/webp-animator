@@ -22,9 +22,27 @@ def _now() -> float:
 
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
+    )
     temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(temporary, path)
+    try:
+        for attempt in range(40):
+            try:
+                os.replace(temporary, path)
+                return
+            except PermissionError:
+                if attempt == 39:
+                    raise
+                # Windows does not allow replacing a file while another thread or
+                # scanner has it open without delete sharing. Browser polling can
+                # briefly overlap a manifest read, so retry after the reader closes.
+                time.sleep(min(0.01 * (attempt + 1), 0.10))
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 class OpenAIBatchManager:
@@ -42,6 +60,7 @@ class OpenAIBatchManager:
         self.jobs_root = root / ".openai-batches"
         self.jobs_root.mkdir(parents=True, exist_ok=True)
         self.master_lock = threading.Lock()
+        self.io_lock = threading.RLock()
         self.running: set[str] = set()
         self._mark_interrupted()
 
@@ -55,20 +74,22 @@ class OpenAIBatchManager:
 
     def _save(self, job: dict[str, Any]) -> None:
         job["updated"] = _now()
-        _atomic_json(self._manifest(str(job["id"])), job)
+        with self.io_lock:
+            _atomic_json(self._manifest(str(job["id"])), job)
 
     def get(self, job_id: str) -> dict[str, Any] | None:
         try:
             path = self._manifest(job_id)
         except ValueError:
             return None
-        if not path.is_file():
-            return None
-        try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-            return value if isinstance(value, dict) else None
-        except Exception:
-            return None
+        with self.io_lock:
+            if not path.is_file():
+                return None
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+                return value if isinstance(value, dict) else None
+            except Exception:
+                return None
 
     def _mark_interrupted(self) -> None:
         for path in self.jobs_root.glob("*/job.json"):
