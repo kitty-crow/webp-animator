@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import gc
 import os
 import sys
 from pathlib import Path
@@ -10,7 +9,23 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from worker_common import content_bbox, load_rgba, read_manifest, recursive_midpoints, write_result
+# Match the allocator setting that made RIFE substantially less fragile on the
+# 4 GB card. This is intentionally set before AMT imports torch.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+from worker_common import (
+    content_bbox,
+    is_cuda_oom,
+    load_rgba,
+    read_manifest,
+    recursive_midpoints,
+    release_cuda,
+    write_result,
+)
+
+AMT_SCALES = (1.0, 0.75, 0.5, 0.25)
+TILE_CORE = 256
+TILE_CONTEXT = 64
 
 
 def parse_args():
@@ -39,17 +54,19 @@ def load_amt(source: Path, config: Path, checkpoint: Path):
     model.load_state_dict(state)
     model = model.to(device).eval()
     del ckpt, state
+
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = False
+        release_cuda(torch)
     return torch, device, model
 
 
-def _tensor(torch, image: Image.Image, device):
-    array = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
-    return torch.from_numpy(array.transpose(2, 0, 1)).unsqueeze(0).to(device)
-
-
-def _alpha_tensor(torch, image: Image.Image, device):
-    alpha = np.asarray(image.getchannel("A"), dtype=np.float32) / 255.0
-    array = np.repeat(alpha[..., None], 3, axis=2)
+def _tensor(torch, image: Image.Image, device, *, alpha: bool):
+    if alpha:
+        plane = np.asarray(image.getchannel("A"), dtype=np.float32) / 255.0
+        array = np.repeat(plane[..., None], 3, axis=2)
+    else:
+        array = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
     return torch.from_numpy(array.transpose(2, 0, 1)).unsqueeze(0).to(device)
 
 
@@ -62,23 +79,102 @@ def _run_model(torch, model, first_t, second_t, scale_factor: float):
     embt = torch.tensor(0.5, device=first_t.device, dtype=first_t.dtype).view(1, 1, 1, 1)
     with torch.inference_mode():
         pred = model(first_p, second_p, embt, scale_factor=scale_factor, eval=True)["imgt_pred"]
-    pred = padder.unpad(pred)
-    return pred.clamp(0.0, 1.0)
+    return padder.unpad(pred).clamp(0.0, 1.0)
 
 
-def _infer_with_fallback(torch, model, first_t, second_t):
-    scales = (1.0, 0.75, 0.5, 0.25) if first_t.device.type == "cuda" else (1.0,)
-    last_error = None
-    for scale in scales:
-        try:
-            return _run_model(torch, model, first_t, second_t, scale)
-        except torch.OutOfMemoryError as exc:
-            last_error = exc
-            torch.cuda.empty_cache()
-            gc.collect()
-    if last_error is not None:
-        raise last_error
-    raise RuntimeError("AMT inference failed")
+def _infer_region(torch, device, model, first: Image.Image, second: Image.Image, *, alpha: bool):
+    """Infer one region, progressively lowering AMT internal scale on CUDA OOM."""
+    first_t = None
+    second_t = None
+    try:
+        first_t = _tensor(torch, first, device, alpha=alpha)
+        second_t = _tensor(torch, second, device, alpha=alpha)
+        scales = AMT_SCALES if device.type == "cuda" else (1.0,)
+        last_message = None
+
+        for index, scale in enumerate(scales):
+            pred = None
+            try:
+                pred = _run_model(torch, model, first_t, second_t, scale)
+                if alpha:
+                    result = pred[0, 0].mul(255).byte().cpu().numpy()
+                else:
+                    result = pred[0].mul(255).byte().cpu().numpy().transpose(1, 2, 0)
+                del pred
+                release_cuda(torch)
+                return result, scale
+            except Exception as exc:
+                if not is_cuda_oom(torch, exc):
+                    raise
+                last_message = str(exc)
+                del pred
+                release_cuda(torch)
+                if index + 1 < len(scales):
+                    channel = "alpha" if alpha else "RGB"
+                    print(
+                        f"AMT CUDA OOM for {channel} at scale={scale:g}; "
+                        f"retrying at scale={scales[index + 1]:g}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+
+        raise RuntimeError(last_message or "AMT inference exhausted its CUDA scale fallbacks")
+    finally:
+        del second_t, first_t
+        release_cuda(torch)
+
+
+def _interpolate_region(torch, device, model, first: Image.Image, second: Image.Image) -> Image.Image:
+    rgb, rgb_scale = _infer_region(torch, device, model, first, second, alpha=False)
+
+    a0 = np.asarray(first.getchannel("A"), dtype=np.uint8)
+    a1 = np.asarray(second.getchannel("A"), dtype=np.uint8)
+    if np.all(a0 == 255) and np.all(a1 == 255):
+        alpha = np.full(a0.shape, 255, dtype=np.uint8)
+        alpha_scale = rgb_scale
+    else:
+        release_cuda(torch)
+        alpha, alpha_scale = _infer_region(torch, device, model, first, second, alpha=True)
+
+    if rgb_scale != 1.0 or alpha_scale != 1.0:
+        print(
+            f"AMT_SCALE rgb={rgb_scale:g} alpha={alpha_scale:g}",
+            file=sys.stderr,
+            flush=True,
+        )
+    return Image.fromarray(np.dstack((rgb, alpha)), "RGBA")
+
+
+def _interpolate_tiled(torch, device, model, first: Image.Image, second: Image.Image) -> Image.Image:
+    """RIFE-style contextual tiling fallback for frames that still exceed VRAM."""
+    width, height = first.size
+    output = Image.new("RGBA", first.size, (0, 0, 0, 0))
+    tile_count_x = (width + TILE_CORE - 1) // TILE_CORE
+    tile_count_y = (height + TILE_CORE - 1) // TILE_CORE
+    print(
+        f"AMT_TILE_FALLBACK size={width}x{height} grid={tile_count_x}x{tile_count_y}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+    for y0 in range(0, height, TILE_CORE):
+        y1 = min(height, y0 + TILE_CORE)
+        for x0 in range(0, width, TILE_CORE):
+            x1 = min(width, x0 + TILE_CORE)
+            ex0 = max(0, x0 - TILE_CONTEXT)
+            ey0 = max(0, y0 - TILE_CONTEXT)
+            ex1 = min(width, x1 + TILE_CONTEXT)
+            ey1 = min(height, y1 + TILE_CONTEXT)
+
+            tile0 = first.crop((ex0, ey0, ex1, ey1))
+            tile1 = second.crop((ex0, ey0, ex1, ey1))
+            tile_mid = _interpolate_region(torch, device, model, tile0, tile1)
+            core = tile_mid.crop((x0 - ex0, y0 - ey0, x1 - ex0, y1 - ey0))
+            output.paste(core, (x0, y0))
+            del core, tile_mid, tile1, tile0
+            release_cuda(torch)
+
+    return output
 
 
 def make_interpolator(torch, device, model):
@@ -91,27 +187,19 @@ def make_interpolator(torch, device, model):
 
         crop0 = first.crop(bbox)
         crop1 = second.crop(bbox)
-        t0 = _tensor(torch, crop0, device)
-        t1 = _tensor(torch, crop1, device)
-        rgb_t = _infer_with_fallback(torch, model, t0, t1)
-        rgb = rgb_t[0].mul(255).byte().cpu().numpy().transpose(1, 2, 0)
+        try:
+            middle = _interpolate_region(torch, device, model, crop0, crop1)
+        except Exception as exc:
+            if not is_cuda_oom(torch, exc):
+                raise
+            release_cuda(torch)
+            middle = _interpolate_tiled(torch, device, model, crop0, crop1)
 
-        a0 = np.asarray(crop0.getchannel("A"), dtype=np.uint8)
-        a1 = np.asarray(crop1.getchannel("A"), dtype=np.uint8)
-        if np.all(a0 == 255) and np.all(a1 == 255):
-            alpha = np.full(a0.shape, 255, dtype=np.uint8)
-        else:
-            at0 = _alpha_tensor(torch, crop0, device)
-            at1 = _alpha_tensor(torch, crop1, device)
-            alpha_t = _infer_with_fallback(torch, model, at0, at1)
-            alpha = alpha_t[0, 0].mul(255).byte().cpu().numpy()
+        if crop0.size == first.size:
+            return middle
 
-        rgba = Image.fromarray(np.dstack((rgb, alpha)), "RGBA")
         output = Image.new("RGBA", first.size, (0, 0, 0, 0))
-        output.alpha_composite(rgba, (bbox[0], bbox[1]))
-        del t1, t0, rgb_t
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
+        output.paste(middle, (bbox[0], bbox[1]))
         return output
 
     return interpolate
@@ -155,9 +243,7 @@ def main():
             alpha_threshold=int(task.get("alpha_threshold", 8)),
         )
         result_tasks.append({"id": task.get("id", str(task_index)), "frames": frames})
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
-        gc.collect()
+        release_cuda(torch)
 
     write_result(args.result, {"tasks": result_tasks})
 
