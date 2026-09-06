@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import argparse
-import gc
 import os
 import sys
 from pathlib import Path
@@ -10,10 +8,23 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from worker_common import alpha_midpoint, compose_rgb_with_alpha, content_bbox, load_rgba, read_manifest, write_result
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+from worker_common import (
+    alpha_midpoint,
+    compose_rgb_with_alpha,
+    content_bbox,
+    is_cuda_oom,
+    load_rgba,
+    read_manifest,
+    release_cuda,
+    write_result,
+)
 
 
 def parse_args():
+    import argparse
+
     parser = argparse.ArgumentParser(description="EDEN midpoint generation worker")
     parser.add_argument("--eden-dir", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
@@ -64,6 +75,9 @@ def main():
     model.load_state_dict(checkpoint["eden"])
     del checkpoint
     model = model.to(device).eval()
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = False
+        release_cuda(torch)
 
     transport = create_transport("Linear", "velocity")
     sampler = Sampler(transport)
@@ -117,8 +131,7 @@ def main():
             generated = padder.unpad(generated.clamp(0.0, 1.0))
         rgb = generated[0].mul(255).byte().cpu().numpy().transpose(1, 2, 0)
         del generated, latents, samples, noise, cond_frames, difference, frame1, frame0
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
+        release_cuda(torch)
         return Image.fromarray(rgb, "RGB")
 
     tasks = list(manifest.get("tasks", []))
@@ -136,7 +149,7 @@ def main():
             crop1 = second.crop(bbox)
             original_size = crop0.size
             rgb_result = None
-            last_error = None
+            last_message = None
             for scale in ((1.0, 0.75, 0.5, 0.375) if device.type == "cuda" else (1.0,)):
                 try:
                     scaled0, scaled1 = _resize_pair(crop0, crop1, scale)
@@ -144,14 +157,13 @@ def main():
                     if rgb_result.size != original_size:
                         rgb_result = rgb_result.resize(original_size, Image.Resampling.LANCZOS)
                     break
-                except torch.OutOfMemoryError as exc:
-                    last_error = exc
-                    torch.cuda.empty_cache()
-                    gc.collect()
+                except Exception as exc:
+                    if not is_cuda_oom(torch, exc):
+                        raise
+                    last_message = str(exc)
+                    release_cuda(torch)
             if rgb_result is None:
-                if last_error is not None:
-                    raise last_error
-                raise RuntimeError("EDEN failed to generate a frame")
+                raise RuntimeError(last_message or "EDEN failed to generate a frame")
             alpha = alpha_midpoint(crop0, crop1)
             generated = compose_rgb_with_alpha(rgb_result, alpha, first.size, bbox)
 
@@ -159,9 +171,7 @@ def main():
         generated.save(path)
         results.append({"id": task.get("id", str(task_index)), "frame": str(path)})
         print(f"PROGRESS {task_index + 1} {max(1, len(tasks))}", flush=True)
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
-        gc.collect()
+        release_cuda(torch)
 
     write_result(args.result, {"tasks": results})
 
