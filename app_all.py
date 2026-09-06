@@ -10,7 +10,9 @@ from urllib.parse import parse_qs, urlparse
 
 import app as legacy
 import app_openai as enhanced
+from cancellable_openai import CancellableEnhancedOpenAIJobManager
 from global_jobs import GlobalJobStore
+from openai_batch import OpenAIBatchManager
 from resilient_bridge import ResilientAuditorAwareBridgeClient
 
 ROOT = Path(__file__).resolve().parent
@@ -18,10 +20,19 @@ GLOBAL = GlobalJobStore(ROOT)
 WORKSPACE_FRAGMENT = (ROOT / "workspace_ui" / "fragment.html").read_text(encoding="utf-8")
 WORKSPACE_SCRIPT = (ROOT / "workspace_ui" / "workspace.js").read_bytes()
 WORKSPACE_OPENAI_LINK = (ROOT / "workspace_ui" / "openai-link.js").read_bytes()
+OPENAI_CANCEL_SCRIPT = (ROOT / "openai_ui" / "cancel.js").read_bytes()
 
-# Planner/auditor structured-output failures are retried adaptively instead of repeating
-# the same undersized reasoning request. The same bridge instance is used by direct and
-# batch OpenAI jobs so both paths get identical recovery and auditor-override behaviour.
+# app_openai creates its default managers at import time. Replace them in the unified
+# server with cancellable managers before serving any requests. app_openai's helper
+# functions resolve these module globals dynamically, so direct and batch routes both
+# use the cancellable instances below.
+_CANCELLABLE_OPENAI = CancellableEnhancedOpenAIJobManager(ROOT)
+_CANCELLABLE_BATCH = OpenAIBatchManager(ROOT, _CANCELLABLE_OPENAI)
+enhanced.OPENAI = _CANCELLABLE_OPENAI
+enhanced.BATCH = _CANCELLABLE_BATCH
+
+# Planner/auditor structured-output failures are retried adaptively. The same resilient
+# bridge also knows the pipeline's alpha/geometry rules and cooperates with Stop requests.
 _RESILIENT_BRIDGE = ResilientAuditorAwareBridgeClient(ROOT)
 enhanced.OPENAI.bridge = _RESILIENT_BRIDGE
 enhanced.BATCH.child_manager.bridge = _RESILIENT_BRIDGE
@@ -41,7 +52,10 @@ def enhanced_index() -> bytes:
     html = html.replace(marker, WORKSPACE_FRAGMENT + "\n\n" + marker, 1)
     html = html.replace(
         "</body>",
-        '  <script src="/workspace-ui.js"></script>\n  <script src="/workspace-openai-link.js"></script>\n</body>',
+        '  <script src="/workspace-ui.js"></script>\n'
+        '  <script src="/workspace-openai-link.js"></script>\n'
+        '  <script src="/openai-cancel.js"></script>\n'
+        '</body>',
         1,
     )
     return html.encode("utf-8")
@@ -107,7 +121,6 @@ def _settings_from_fields(fields: dict[str, str]) -> dict:
 
 def _run_global_render(job_id: str, paths: list[Path], settings: dict) -> None:
     job_dir = GLOBAL.job_dir(job_id)
-    # Never let stale RIFE/alignment files from an earlier render contaminate a rerun.
     shutil.rmtree(job_dir / "aligned", ignore_errors=True)
     shutil.rmtree(job_dir / "interpolated", ignore_errors=True)
     GLOBAL.update(job_id, status="running", progress=5, message="Persisted job started", error=None)
@@ -143,7 +156,7 @@ def _resume_interrupted_jobs() -> None:
 
 
 class Handler(enhanced.Handler):
-    server_version = "AnimAlignWebP/4.1-global-jobs"
+    server_version = "AnimAlignWebP/4.2-cancellable"
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -153,13 +166,14 @@ class Handler(enhanced.Handler):
         if path == "/":
             self.send_bytes(200, INDEX_HTML, "text/html; charset=utf-8")
             return
-
         if path == "/workspace-ui.js":
             self.send_bytes(200, WORKSPACE_SCRIPT, "text/javascript; charset=utf-8")
             return
-
         if path == "/workspace-openai-link.js":
             self.send_bytes(200, WORKSPACE_OPENAI_LINK, "text/javascript; charset=utf-8")
+            return
+        if path == "/openai-cancel.js":
+            self.send_bytes(200, OPENAI_CANCEL_SCRIPT, "text/javascript; charset=utf-8")
             return
 
         if path == "/job":
@@ -185,12 +199,7 @@ class Handler(enhanced.Handler):
             source_path, name = info
             suffix = Path(name).suffix.lower()
             mime = enhanced.MIME_BY_SUFFIX.get(suffix, "application/octet-stream")
-            self.send_bytes(
-                200,
-                source_path.read_bytes(),
-                mime,
-                {"Content-Disposition": f'inline; filename="{Path(name).name}"'},
-            )
+            self.send_bytes(200, source_path.read_bytes(), mime, {"Content-Disposition": f'inline; filename="{Path(name).name}"'})
             return
 
         if path == "/progress":
@@ -210,12 +219,7 @@ class Handler(enhanced.Handler):
             job_id = query.get("id", [""])[0]
             output = GLOBAL.output_path(job_id)
             if output:
-                self.send_bytes(
-                    200,
-                    output.read_bytes(),
-                    "image/webp",
-                    {"Content-Disposition": 'attachment; filename="animation.webp"'},
-                )
+                self.send_bytes(200, output.read_bytes(), "image/webp", {"Content-Disposition": 'attachment; filename="animation.webp"'})
                 return
             if GLOBAL.get(job_id):
                 self.send_text(409, "This global job does not have a finished WebP yet.")
@@ -225,6 +229,26 @@ class Handler(enhanced.Handler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+
+        if path == "/openai/cancel":
+            try:
+                payload = self.read_json_body()
+                job_id = str(payload.get("job_id", "")).strip().lower()
+                if not job_id:
+                    raise ValueError("Missing OpenAI job ID.")
+                batch = enhanced.BATCH.get(job_id)
+                if batch:
+                    result = enhanced.BATCH.cancel(job_id)
+                else:
+                    if not enhanced.OPENAI.get(job_id):
+                        raise KeyError(job_id)
+                    result = enhanced.OPENAI.cancel(job_id)
+                self.send_json(202, result)
+            except KeyError:
+                self.send_json(404, {"error": "Unknown OpenAI interpolation job."})
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
 
         if path == "/job/new":
             try:
@@ -253,11 +277,7 @@ class Handler(enhanced.Handler):
             try:
                 content_type, body = self.read_upload_body()
                 fields, uploads_raw = legacy.parse_multipart(content_type, body)
-                selected = [
-                    (filename, payload)
-                    for field, filename, payload in uploads_raw
-                    if field == "frames" and filename
-                ]
+                selected = [(filename, payload) for field, filename, payload in uploads_raw if field == "frames" and filename]
                 if not selected:
                     raise ValueError("No frames were uploaded.")
                 for filename, _ in selected:
@@ -290,6 +310,7 @@ def main():
     print(f"RIFE:         {'ready' if ready else 'not installed'}")
     print(f"OpenAI:       {'configured' if openai_status['key_configured'] else 'no API key'}")
     print("Global jobs:  durable with no automatic expiry")
+    print("OpenAI stop:  cooperative cancellation enabled")
     print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()
