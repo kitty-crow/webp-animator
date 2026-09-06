@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: vendor/openai-schema/package-lock.json
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Build and test vendored openai-schema
+        working-directory: vendor/openai-schema
+        run: |
+          npm ci
+          npm run ci
+
+      - name: Check Python syntax and enhanced app import
+        run: |
+          python -m py_compile app.py app_openai.py openai_interrogator.py anim_align_webp.py rife_worker.py setup_openai.py setup_rife.py
+          python - <<'PY'
+          import app_openai
+          assert b"OpenAI Interrogator" in app_openai.INDEX_HTML
+          status = app_openai.OPENAI.bridge.status()
+          assert "key_configured" in status
+          assert "schema_built" in status
+          PY
+
+      - name: Check bridge syntax
+        run: node --check openai_bridge/server.mjs
+
+      - name: Smoke-test local bridge without API calls
+        shell: bash
+        run: |
+          set -euo pipefail
+          OPENAI_BRIDGE_PORT=18745 node openai_bridge/server.mjs >/tmp/openai-bridge.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:18745/health >/tmp/health.json; then break; fi
+            sleep 0.2
+          done
+          python - <<'PY'
+          import json
+          with open('/tmp/health.json', encoding='utf-8') as f:
+              health = json.load(f)
+          assert health['ok'] is True
+          assert health['key_configured'] is False
+          PY
+          curl -fsS -X POST http://127.0.0.1:18745/estimate \
+            -H 'content-type: application/json' \
+            -d '{"planner_model":"gpt-5.6-luna","auditor_model":"gpt-5.6-luna","image_quality":"medium","width":1024,"height":1536,"reference_count":2,"context_count":1,"attempts":1}' \
+            >/tmp/estimate.json
+          python - <<'PY'
+          import json
+          with open('/tmp/estimate.json', encoding='utf-8') as f:
+              estimate = json.load(f)
+          assert estimate['one_attempt'] > 0
+          assert estimate['maximum'] >= estimate['one_attempt']
+          PY
