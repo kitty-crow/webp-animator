@@ -9,53 +9,33 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import app as legacy
-import app_openai as enhanced
-from cancellable_openai import CancellableEnhancedOpenAIJobManager
 from global_jobs import GlobalJobStore
-from openai_batch import OpenAIBatchManager
-from resilient_bridge import ResilientAuditorAwareBridgeClient
 
 ROOT = Path(__file__).resolve().parent
 GLOBAL = GlobalJobStore(ROOT)
 WORKSPACE_FRAGMENT = (ROOT / "workspace_ui" / "fragment.html").read_text(encoding="utf-8")
 WORKSPACE_SCRIPT = (ROOT / "workspace_ui" / "workspace.js").read_bytes()
-WORKSPACE_OPENAI_LINK = (ROOT / "workspace_ui" / "openai-link.js").read_bytes()
-OPENAI_CANCEL_SCRIPT = (ROOT / "openai_ui" / "cancel.js").read_bytes()
 
-# app_openai creates its default managers at import time. Replace them in the unified
-# server with cancellable managers before serving any requests. app_openai's helper
-# functions resolve these module globals dynamically, so direct and batch routes both
-# use the cancellable instances below.
-_CANCELLABLE_OPENAI = CancellableEnhancedOpenAIJobManager(ROOT)
-_CANCELLABLE_BATCH = OpenAIBatchManager(ROOT, _CANCELLABLE_OPENAI)
-enhanced.OPENAI = _CANCELLABLE_OPENAI
-enhanced.BATCH = _CANCELLABLE_BATCH
-
-# Planner/auditor structured-output failures are retried adaptively. The same resilient
-# bridge also knows the pipeline's alpha/geometry rules and cooperates with Stop requests.
-_RESILIENT_BRIDGE = ResilientAuditorAwareBridgeClient(ROOT)
-enhanced.OPENAI.bridge = _RESILIENT_BRIDGE
-enhanced.BATCH.child_manager.bridge = _RESILIENT_BRIDGE
-
-# Global jobs are explicitly user-owned and have no age-based cleanup. OpenAI child
-# jobs linked to them must follow the same rule so a restored global ID never points
-# at a child that disappeared because a timer elapsed.
-enhanced.OPENAI.cleanup = lambda *args, **kwargs: None
-enhanced.BATCH.cleanup = lambda *args, **kwargs: None
+MIME_BY_SUFFIX = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".bmp": "image/bmp",
+    ".tif": "image/tiff",
+    ".tiff": "image/tiff",
+    ".webp": "image/webp",
+}
 
 
 def enhanced_index() -> bytes:
-    html = enhanced.INDEX_HTML.decode("utf-8")
+    html = legacy.INDEX_HTML.decode("utf-8")
     marker = '    <form id="form" enctype="multipart/form-data">'
     if marker not in html:
         raise RuntimeError("Could not find WebP Animator form for global-job UI injection.")
     html = html.replace(marker, WORKSPACE_FRAGMENT + "\n\n" + marker, 1)
     html = html.replace(
         "</body>",
-        '  <script src="/workspace-ui.js"></script>\n'
-        '  <script src="/workspace-openai-link.js"></script>\n'
-        '  <script src="/openai-cancel.js"></script>\n'
-        '</body>',
+        '  <script src="/workspace-ui.js"></script>\n</body>',
         1,
     )
     return html.encode("utf-8")
@@ -123,6 +103,10 @@ def _run_global_render(job_id: str, paths: list[Path], settings: dict) -> None:
     job_dir = GLOBAL.job_dir(job_id)
     shutil.rmtree(job_dir / "aligned", ignore_errors=True)
     shutil.rmtree(job_dir / "interpolated", ignore_errors=True)
+    try:
+        (job_dir / "animation.webp").unlink(missing_ok=True)
+    except OSError:
+        pass
     GLOBAL.update(job_id, status="running", progress=5, message="Persisted job started", error=None)
     legacy.process_job(job_id, paths, settings)
 
@@ -151,12 +135,35 @@ def _resume_interrupted_jobs() -> None:
         paths = [GLOBAL.job_dir(str(job["id"])) / str(item.get("path", "")) for item in sources]
         if not all(path.is_file() for path in paths):
             continue
-        GLOBAL.update(str(job["id"]), status="queued", message="Resuming persisted render after server restart", error=None)
+        GLOBAL.update(
+            str(job["id"]),
+            status="queued",
+            message="Resuming persisted render after server restart",
+            error=None,
+        )
         _start_global_render(str(job["id"]), paths, settings)
 
 
-class Handler(enhanced.Handler):
-    server_version = "AnimAlignWebP/4.2-cancellable"
+class Handler(legacy.Handler):
+    server_version = "AnimAlignWebP/5.0-persistent"
+
+    def read_json_body(self, max_bytes: int = 1024 * 1024) -> dict:
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError as exc:
+            raise ValueError("Invalid Content-Length.") from exc
+        if content_length <= 0:
+            return {}
+        if content_length > max_bytes:
+            raise OverflowError("JSON request is too large.")
+        content_type = self.headers.get("Content-Type", "")
+        if "application/json" not in content_type:
+            raise ValueError("Expected application/json.")
+        raw = self.rfile.read(content_length)
+        value = json.loads(raw.decode("utf-8") or "{}")
+        if not isinstance(value, dict):
+            raise ValueError("Expected a JSON object.")
+        return value
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -166,14 +173,9 @@ class Handler(enhanced.Handler):
         if path == "/":
             self.send_bytes(200, INDEX_HTML, "text/html; charset=utf-8")
             return
+
         if path == "/workspace-ui.js":
             self.send_bytes(200, WORKSPACE_SCRIPT, "text/javascript; charset=utf-8")
-            return
-        if path == "/workspace-openai-link.js":
-            self.send_bytes(200, WORKSPACE_OPENAI_LINK, "text/javascript; charset=utf-8")
-            return
-        if path == "/openai-cancel.js":
-            self.send_bytes(200, OPENAI_CANCEL_SCRIPT, "text/javascript; charset=utf-8")
             return
 
         if path == "/job":
@@ -197,29 +199,41 @@ class Handler(enhanced.Handler):
                 self.send_text(404, "Global job source frame not found.")
                 return
             source_path, name = info
-            suffix = Path(name).suffix.lower()
-            mime = enhanced.MIME_BY_SUFFIX.get(suffix, "application/octet-stream")
-            self.send_bytes(200, source_path.read_bytes(), mime, {"Content-Disposition": f'inline; filename="{Path(name).name}"'})
+            mime = MIME_BY_SUFFIX.get(Path(name).suffix.lower(), "application/octet-stream")
+            self.send_bytes(
+                200,
+                source_path.read_bytes(),
+                mime,
+                {"Content-Disposition": f'inline; filename="{Path(name).name}"'},
+            )
             return
 
         if path == "/progress":
             job_id = query.get("id", [""])[0]
             job = GLOBAL.get(job_id)
             if job:
-                self.send_json(200, {
-                    "status": job.get("status", "draft"),
-                    "progress": job.get("progress", 0),
-                    "message": job.get("message", ""),
-                    "error": job.get("error"),
-                    "output_available": bool(GLOBAL.output_path(job_id)),
-                })
+                self.send_json(
+                    200,
+                    {
+                        "status": job.get("status", "draft"),
+                        "progress": job.get("progress", 0),
+                        "message": job.get("message", ""),
+                        "error": job.get("error"),
+                        "output_available": bool(GLOBAL.output_path(job_id)),
+                    },
+                )
                 return
 
         if path == "/download":
             job_id = query.get("id", [""])[0]
             output = GLOBAL.output_path(job_id)
             if output:
-                self.send_bytes(200, output.read_bytes(), "image/webp", {"Content-Disposition": 'attachment; filename="animation.webp"'})
+                self.send_bytes(
+                    200,
+                    output.read_bytes(),
+                    "image/webp",
+                    {"Content-Disposition": 'attachment; filename="animation.webp"'},
+                )
                 return
             if GLOBAL.get(job_id):
                 self.send_text(409, "This global job does not have a finished WebP yet.")
@@ -230,45 +244,14 @@ class Handler(enhanced.Handler):
     def do_POST(self):
         path = urlparse(self.path).path
 
-        if path == "/openai/cancel":
-            try:
-                payload = self.read_json_body()
-                job_id = str(payload.get("job_id", "")).strip().lower()
-                if not job_id:
-                    raise ValueError("Missing OpenAI job ID.")
-                batch = enhanced.BATCH.get(job_id)
-                if batch:
-                    result = enhanced.BATCH.cancel(job_id)
-                else:
-                    if not enhanced.OPENAI.get(job_id):
-                        raise KeyError(job_id)
-                    result = enhanced.OPENAI.cancel(job_id)
-                self.send_json(202, result)
-            except KeyError:
-                self.send_json(404, {"error": "Unknown OpenAI interpolation job."})
-            except Exception as exc:
-                self.send_json(400, {"error": str(exc)})
-            return
-
         if path == "/job/new":
             try:
                 payload = self.read_json_body()
                 requested = str(payload.get("job_id", "")).strip().lower() or None
                 job = GLOBAL.ensure(requested)
                 self.send_json(200, GLOBAL.public(job))
-            except Exception as exc:
-                self.send_json(400, {"error": str(exc)})
-            return
-
-        if path == "/job/link-openai":
-            try:
-                payload = self.read_json_body()
-                job_id = str(payload.get("job_id", "")).strip().lower()
-                openai_job_id = str(payload.get("openai_job_id", "")).strip().lower()
-                if not openai_job_id:
-                    raise ValueError("Missing OpenAI job ID.")
-                job = GLOBAL.attach_openai(job_id, openai_job_id)
-                self.send_json(200, GLOBAL.public(job))
+            except OverflowError as exc:
+                self.send_json(413, {"error": str(exc)})
             except Exception as exc:
                 self.send_json(400, {"error": str(exc)})
             return
@@ -277,7 +260,11 @@ class Handler(enhanced.Handler):
             try:
                 content_type, body = self.read_upload_body()
                 fields, uploads_raw = legacy.parse_multipart(content_type, body)
-                selected = [(filename, payload) for field, filename, payload in uploads_raw if field == "frames" and filename]
+                selected = [
+                    (filename, payload)
+                    for field, filename, payload in uploads_raw
+                    if field == "frames" and filename
+                ]
                 if not selected:
                     raise ValueError("No frames were uploaded.")
                 for filename, _ in selected:
@@ -303,14 +290,11 @@ def main():
     _resume_interrupted_jobs()
     ready, _, _, _ = legacy.rife_paths()
     server = ThreadingHTTPServer((legacy.HOST, legacy.PORT), Handler)
-    openai_status = enhanced.OPENAI.bridge.status()
-    print(f"WebP Animator unified job server listening on http://{legacy.HOST}:{legacy.PORT}")
+    print(f"WebP Animator persistent server listening on http://{legacy.HOST}:{legacy.PORT}")
     print(f"Local access: http://127.0.0.1:{legacy.PORT}")
     print(f"LAN access:   http://<this-machine-LAN-IP>:{legacy.PORT}")
     print(f"RIFE:         {'ready' if ready else 'not installed'}")
-    print(f"OpenAI:       {'configured' if openai_status['key_configured'] else 'no API key'}")
     print("Global jobs:  durable with no automatic expiry")
-    print("OpenAI stop:  cooperative cancellation enabled")
     print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()
