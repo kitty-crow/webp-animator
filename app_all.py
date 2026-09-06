@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import app as legacy
+from frame1_optimizer import find_best_scale_and_translation as fast_find_best_scale_and_translation
 from global_jobs import GlobalJobStore
 
 ROOT = Path(__file__).resolve().parent
@@ -45,6 +46,11 @@ INDEX_HTML = enhanced_index()
 
 _original_get_job = legacy.get_job
 _original_set_job = legacy.set_job
+
+# The legacy frame-1 matcher performed full-resolution translation refinement for
+# every scale candidate, which is catastrophically slow on 2K/3K frames. Keep
+# the public/legacy API but replace that one implementation in the persistent app.
+legacy.find_best_scale_and_translation = fast_find_best_scale_and_translation
 
 
 def _persistent_get_job(job_id: str):
