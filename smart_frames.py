@@ -2,11 +2,20 @@ from __future__ import annotations
 
 import math
 import os
+import threading
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from typing import Iterable, Sequence
 
 import numpy as np
 from PIL import Image
+
+# Reduction passes repeatedly score mostly unchanged neighbour triplets. Cache those
+# triplets by object identity, but retain weak references so an id reused after an
+# image is collected can never return a stale score.
+_REDUCTION_CACHE: dict[tuple[int, int, int, int], tuple[weakref.ReferenceType, weakref.ReferenceType, weakref.ReferenceType, float]] = {}
+_REDUCTION_CACHE_LOCK = threading.Lock()
+_REDUCTION_CACHE_LIMIT = 8192
 
 
 def _torch_cuda():
@@ -20,6 +29,33 @@ def _torch_cuda():
     return None
 
 
+def _gpu_target_bytes(torch) -> int:
+    """Choose an analysis batch budget from currently free VRAM.
+
+    FRAME_ANALYSIS_GPU_BYTES remains an exact user override. Otherwise reserve most
+    VRAM for models/UI/driver use and scale analysis batches up on roomier cards.
+    """
+    explicit = os.environ.get("FRAME_ANALYSIS_GPU_BYTES")
+    if explicit:
+        try:
+            return max(1, int(explicit))
+        except ValueError:
+            pass
+    default = 192 * 1024 * 1024
+    try:
+        free_bytes, _ = torch.cuda.mem_get_info()
+        return max(
+            1,
+            min(768 * 1024 * 1024, int(free_bytes * 0.28)),
+        )
+    except Exception:
+        return default
+
+
+def _rgba_u8(image: Image.Image) -> np.ndarray:
+    return np.asarray(image.convert("RGBA"), dtype=np.uint8)
+
+
 def _rgba_array(image: Image.Image) -> np.ndarray:
     """Return RGBA in 0..1 with RGB premultiplied by alpha.
 
@@ -29,6 +65,12 @@ def _rgba_array(image: Image.Image) -> np.ndarray:
     array = np.asarray(image.convert("RGBA"), dtype=np.float32).copy() / 255.0
     array[..., :3] *= array[..., 3:4]
     return array
+
+
+def _premultiply_array_u8(array: np.ndarray) -> np.ndarray:
+    value = array.astype(np.float32) / 255.0
+    value[..., :3] *= value[..., 3:4]
+    return value
 
 
 def _premultiply_torch(tensor):
@@ -80,6 +122,8 @@ def _cpu_pair_scores(
     pairs: Sequence[tuple[int, int]],
     alpha_threshold: int,
 ):
+    # Decode/premultiply every source at most once for this analysis call instead of
+    # once per pair. This matters for loop scoring and long animations.
     arrays = [_rgba_array(frame) for frame in frames]
     workers = max(
         1,
@@ -152,23 +196,19 @@ def _gpu_pair_scores(
     if any(frame.size != (width, height) for frame in frames):
         raise ValueError("Smart frame analysis requires a common canvas.")
 
+    # Decode once on CPU, then build CUDA batches from the reusable arrays.
+    arrays = [_rgba_u8(frame) for frame in frames]
     device = torch.device("cuda")
     bytes_per_pair = max(1, height * width * 4 * 4 * 3)
-    target_bytes = int(os.environ.get("FRAME_ANALYSIS_GPU_BYTES", 192 * 1024 * 1024))
-    batch_size = max(1, min(32, target_bytes // bytes_per_pair))
+    target_bytes = _gpu_target_bytes(torch)
+    batch_size = max(1, min(64, target_bytes // bytes_per_pair))
     results: list[float] = []
 
     try:
         for start in range(0, len(pairs), batch_size):
             chunk = pairs[start:start + batch_size]
-            a_np = np.stack([
-                np.asarray(frames[i].convert("RGBA"), dtype=np.uint8)
-                for i, _ in chunk
-            ])
-            b_np = np.stack([
-                np.asarray(frames[j].convert("RGBA"), dtype=np.uint8)
-                for _, j in chunk
-            ])
+            a_np = np.stack([arrays[i] for i, _ in chunk])
+            b_np = np.stack([arrays[j] for _, j in chunk])
             a = torch.from_numpy(a_np).to(device=device, dtype=torch.float32).div_(255.0)
             b = torch.from_numpy(b_np).to(device=device, dtype=torch.float32).div_(255.0)
             a = _premultiply_torch(a)
@@ -207,13 +247,132 @@ def gap_scores(frames: Sequence[Image.Image], *, alpha_threshold: int = 8) -> li
     )
 
 
-def _reduction_score_cpu(args) -> float:
-    a, b, c, alpha_threshold = args
-    aa = _rgba_array(a)
-    bb = _rgba_array(b)
-    cc = _rgba_array(c)
-    predicted = (aa + cc) * 0.5
-    return _score_arrays(bb, predicted, alpha_threshold)
+def _reduction_cache_key(a: Image.Image, b: Image.Image, c: Image.Image, alpha_threshold: int):
+    return (id(a), id(b), id(c), int(alpha_threshold))
+
+
+def _reduction_cache_get(a: Image.Image, b: Image.Image, c: Image.Image, alpha_threshold: int):
+    key = _reduction_cache_key(a, b, c, alpha_threshold)
+    with _REDUCTION_CACHE_LOCK:
+        entry = _REDUCTION_CACHE.get(key)
+        if entry is None:
+            return None
+        ra, rb, rc, score = entry
+        if ra() is a and rb() is b and rc() is c:
+            return float(score)
+        _REDUCTION_CACHE.pop(key, None)
+    return None
+
+
+def _reduction_cache_put(a: Image.Image, b: Image.Image, c: Image.Image, alpha_threshold: int, score: float):
+    try:
+        entry = (weakref.ref(a), weakref.ref(b), weakref.ref(c), float(score))
+    except TypeError:
+        return
+    key = _reduction_cache_key(a, b, c, alpha_threshold)
+    with _REDUCTION_CACHE_LOCK:
+        _REDUCTION_CACHE[key] = entry
+        if len(_REDUCTION_CACHE) > _REDUCTION_CACHE_LIMIT:
+            dead = [
+                cache_key
+                for cache_key, (ra, rb, rc, _) in _REDUCTION_CACHE.items()
+                if ra() is None or rb() is None or rc() is None
+            ]
+            for cache_key in dead:
+                _REDUCTION_CACHE.pop(cache_key, None)
+            if len(_REDUCTION_CACHE) > _REDUCTION_CACHE_LIMIT:
+                # A bounded cache is more important than retaining every old job.
+                for cache_key in list(_REDUCTION_CACHE)[: len(_REDUCTION_CACHE) // 2]:
+                    _REDUCTION_CACHE.pop(cache_key, None)
+
+
+def _cpu_reduction_triplets(
+    frames: Sequence[Image.Image],
+    triplets: Sequence[tuple[int, int, int]],
+    alpha_threshold: int,
+):
+    arrays = [_rgba_array(frame) for frame in frames]
+    workers = max(
+        1,
+        min(
+            len(triplets) or 1,
+            int(os.environ.get("FRAME_ANALYSIS_THREADS", os.cpu_count() or 1)),
+        ),
+    )
+
+    def score(triplet):
+        left, middle, right = triplet
+        predicted = (arrays[left] + arrays[right]) * 0.5
+        return _score_arrays(arrays[middle], predicted, alpha_threshold)
+
+    if workers <= 1 or len(triplets) <= 1:
+        return [score(triplet) for triplet in triplets]
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="frame-reduce") as pool:
+        return list(pool.map(score, triplets))
+
+
+def _gpu_reduction_triplets(
+    frames: Sequence[Image.Image],
+    triplets: Sequence[tuple[int, int, int]],
+    alpha_threshold: int,
+):
+    torch = _torch_cuda()
+    if torch is None:
+        return None
+    if not triplets:
+        return []
+
+    height, width = frames[0].height, frames[0].width
+    if any(frame.size != (width, height) for frame in frames):
+        raise ValueError("Smart frame analysis requires a common canvas.")
+
+    arrays = [_rgba_u8(frame) for frame in frames]
+    device = torch.device("cuda")
+    bytes_per_triplet = max(1, height * width * 4 * 4 * 4)
+    target_bytes = _gpu_target_bytes(torch)
+    batch_size = max(1, min(48, target_bytes // bytes_per_triplet))
+    results: list[float] = []
+
+    try:
+        for start in range(0, len(triplets), batch_size):
+            chunk = triplets[start:start + batch_size]
+            a_np = np.stack([arrays[left] for left, _, _ in chunk])
+            b_np = np.stack([arrays[middle] for _, middle, _ in chunk])
+            c_np = np.stack([arrays[right] for _, _, right in chunk])
+            a = _premultiply_torch(
+                torch.from_numpy(a_np).to(device=device, dtype=torch.float32).div_(255.0)
+            )
+            b = _premultiply_torch(
+                torch.from_numpy(b_np).to(device=device, dtype=torch.float32).div_(255.0)
+            )
+            c = _premultiply_torch(
+                torch.from_numpy(c_np).to(device=device, dtype=torch.float32).div_(255.0)
+            )
+            predicted = (a + c) * 0.5
+            results.extend(_score_torch_batch(torch, b, predicted, alpha_threshold))
+            del predicted, c, b, a
+            torch.cuda.empty_cache()
+        return results
+    except Exception:
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+        return None
+
+
+def reduction_triplet_scores(
+    frames: Sequence[Image.Image],
+    triplets: Sequence[tuple[int, int, int]],
+    *,
+    alpha_threshold: int = 8,
+) -> list[float]:
+    if not triplets:
+        return []
+    gpu = _gpu_reduction_triplets(frames, triplets, alpha_threshold)
+    if gpu is not None:
+        return gpu
+    return _cpu_reduction_triplets(frames, triplets, alpha_threshold)
 
 
 def reduction_scores(
@@ -224,72 +383,46 @@ def reduction_scores(
     """Error of every interior frame versus the midpoint of its neighbours.
 
     Result position 0 corresponds to frame index 1. Lower scores mean the middle
-    frame contributes less unique temporal information.
+    frame contributes less unique temporal information. Unchanged triplets are
+    reused across iterative reduction rounds, so removing one batch only triggers
+    new GPU/CPU work around neighbourhoods whose adjacency actually changed.
     """
     if len(frames) < 3:
         return []
 
-    torch = _torch_cuda()
-    if torch is not None:
-        try:
-            height, width = frames[0].height, frames[0].width
-            if any(frame.size != (width, height) for frame in frames):
-                raise ValueError("Smart frame analysis requires a common canvas.")
-            device = torch.device("cuda")
-            bytes_per_triplet = max(1, height * width * 4 * 4 * 4)
-            target_bytes = int(os.environ.get("FRAME_ANALYSIS_GPU_BYTES", 192 * 1024 * 1024))
-            batch_size = max(1, min(24, target_bytes // bytes_per_triplet))
-            results: list[float] = []
+    results: list[float | None] = [None] * (len(frames) - 2)
+    missing_positions: list[int] = []
+    missing_triplets: list[tuple[int, int, int]] = []
 
-            for start in range(1, len(frames) - 1, batch_size):
-                indexes = list(range(start, min(len(frames) - 1, start + batch_size)))
-                a_np = np.stack([
-                    np.asarray(frames[i - 1].convert("RGBA"), dtype=np.uint8)
-                    for i in indexes
-                ])
-                b_np = np.stack([
-                    np.asarray(frames[i].convert("RGBA"), dtype=np.uint8)
-                    for i in indexes
-                ])
-                c_np = np.stack([
-                    np.asarray(frames[i + 1].convert("RGBA"), dtype=np.uint8)
-                    for i in indexes
-                ])
-                a = _premultiply_torch(
-                    torch.from_numpy(a_np).to(device=device, dtype=torch.float32).div_(255.0)
-                )
-                b = _premultiply_torch(
-                    torch.from_numpy(b_np).to(device=device, dtype=torch.float32).div_(255.0)
-                )
-                c = _premultiply_torch(
-                    torch.from_numpy(c_np).to(device=device, dtype=torch.float32).div_(255.0)
-                )
-                predicted = (a + c) * 0.5
-                results.extend(_score_torch_batch(torch, b, predicted, alpha_threshold))
-                del predicted, c, b, a
-                torch.cuda.empty_cache()
-            return results
-        except Exception:
-            try:
-                torch.cuda.empty_cache()
-            except Exception:
-                pass
+    for offset, middle in enumerate(range(1, len(frames) - 1)):
+        a = frames[middle - 1]
+        b = frames[middle]
+        c = frames[middle + 1]
+        cached = _reduction_cache_get(a, b, c, alpha_threshold)
+        if cached is None:
+            missing_positions.append(offset)
+            missing_triplets.append((middle - 1, middle, middle + 1))
+        else:
+            results[offset] = cached
 
-    jobs = [
-        (frames[index - 1], frames[index], frames[index + 1], alpha_threshold)
-        for index in range(1, len(frames) - 1)
-    ]
-    workers = max(
-        1,
-        min(
-            len(jobs),
-            int(os.environ.get("FRAME_ANALYSIS_THREADS", os.cpu_count() or 1)),
-        ),
-    )
-    if workers <= 1:
-        return [_reduction_score_cpu(job) for job in jobs]
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="frame-reduce") as pool:
-        return list(pool.map(_reduction_score_cpu, jobs))
+    if missing_triplets:
+        computed = reduction_triplet_scores(
+            frames,
+            missing_triplets,
+            alpha_threshold=alpha_threshold,
+        )
+        for position, triplet, score in zip(missing_positions, missing_triplets, computed):
+            left, middle, right = triplet
+            results[position] = float(score)
+            _reduction_cache_put(
+                frames[left],
+                frames[middle],
+                frames[right],
+                alpha_threshold,
+                float(score),
+            )
+
+    return [float(value or 0.0) for value in results]
 
 
 def non_adjacent_removals(
