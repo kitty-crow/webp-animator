@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlparse
 import app as legacy
 import advanced_pipeline
 import gpu_match
+import temporal_timing
 from engine_paths import engine_status
 from frame1_optimizer import find_best_scale_and_translation as fast_find_best_scale_and_translation
 from global_jobs import GlobalJobStore
@@ -87,6 +88,10 @@ try:
     GPU_GEOMETRY = gpu_match.install(legacy)
 except Exception:
     GPU_GEOMETRY = False
+
+# Smart recursive filling may generate an uneven set of temporal positions. Keep
+# the original interval timing exactly instead of redistributing those frames evenly.
+temporal_timing.install(advanced_pipeline)
 
 
 def _advanced_process_job(job_id: str, paths: list[Path], settings: dict):
