@@ -79,17 +79,20 @@ def recursive_midpoints(
     generate_midpoint,
     save_midpoint,
     alpha_threshold: int = 8,
+    t0: float = 0.0,
+    t1: float = 1.0,
 ):
-    """Generate ordered recursive midpoints while respecting a smart-gap threshold."""
+    """Generate ordered recursive midpoints while retaining their exact temporal t."""
     if depth <= 0:
         return []
     if threshold is not None and gap_score(first, second, alpha_threshold) <= threshold:
         return []
 
+    tm = (t0 + t1) * 0.5
     middle = generate_midpoint(first, second)
-    middle_path = save_midpoint(middle)
+    middle_ref = save_midpoint(middle, tm)
     if depth == 1:
-        return [middle_path]
+        return [middle_ref]
 
     left = recursive_midpoints(
         first,
@@ -99,6 +102,8 @@ def recursive_midpoints(
         generate_midpoint=generate_midpoint,
         save_midpoint=save_midpoint,
         alpha_threshold=alpha_threshold,
+        t0=t0,
+        t1=tm,
     )
     right = recursive_midpoints(
         middle,
@@ -108,5 +113,7 @@ def recursive_midpoints(
         generate_midpoint=generate_midpoint,
         save_midpoint=save_midpoint,
         alpha_threshold=alpha_threshold,
+        t0=tm,
+        t1=t1,
     )
-    return left + [middle_path] + right
+    return left + [middle_ref] + right
