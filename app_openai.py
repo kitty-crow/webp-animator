@@ -2,90 +2,28 @@
 from __future__ import annotations
 
 import json
-import os
-import threading
-import time
-import uuid
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import app as legacy
 from openai_batch import OpenAIBatchManager
-from openai_interrogator import ACTIVE_STATES, OpenAIJobManager, make_contact_sheet
+from openai_interrogator import ACTIVE_STATES
+from openai_job_features import EnhancedOpenAIJobManager
 
 ROOT = Path(__file__).resolve().parent
 
-
-def _atomic_manifest(path: Path, value: dict) -> None:
-    """Write a manifest safely on Windows while the browser is polling it."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(
-        f".{path.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
-    )
-    temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False), encoding="utf-8")
-    try:
-        for attempt in range(40):
-            try:
-                os.replace(temporary, path)
-                return
-            except PermissionError:
-                if attempt == 39:
-                    raise
-                time.sleep(min(0.01 * (attempt + 1), 0.10))
-    finally:
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
-
-
-class FullContextJobManager(OpenAIJobManager):
-    """Sequence-aware OpenAI worker with Windows-safe durable manifests."""
-
-    def __init__(self, root: Path):
-        self._manifest_io_lock = threading.RLock()
-        super().__init__(root)
-
-    def get(self, job_id: str):
-        try:
-            path = self._manifest_path(job_id)
-        except ValueError:
-            return None
-        with self._manifest_io_lock:
-            if not path.is_file():
-                return None
-            try:
-                value = json.loads(path.read_text(encoding="utf-8"))
-                return value if isinstance(value, dict) else None
-            except Exception:
-                return None
-
-    def _save(self, job):
-        job["updated"] = time.time()
-        with self._manifest_io_lock:
-            _atomic_manifest(self._manifest_path(str(job["id"])), job)
-
-    def _context_sheet(self, job):
-        if not job["request"].get("whole_sequence_context", True):
-            return None
-        paths = [self._source_path(job, index) for index in range(len(job["sources"]))]
-        labels = [f"Frame {index + 1}" for index in range(len(paths))]
-        for accepted in sorted(job.get("accepted", []), key=lambda item: float(item["target_fraction"])):
-            paths.append(self._job_dir(job["id"]) / accepted["path"])
-            labels.append(f"Accepted gap frame t={float(accepted['target_fraction']):.3f}")
-        return make_contact_sheet(
-            paths,
-            labels,
-            self._job_dir(job["id"]) / "context" / "sequence.png",
-            max_frames=max(24, len(paths)),
-        )
-
-
-OPENAI = FullContextJobManager(ROOT)
+OPENAI = EnhancedOpenAIJobManager(ROOT)
 BATCH = OpenAIBatchManager(ROOT, OPENAI)
 UI_FRAGMENT = (ROOT / "openai_ui" / "fragment.html").read_text(encoding="utf-8")
 UI_SCRIPT = (ROOT / "openai_ui" / "interrogator.js").read_bytes()
+
+MIME_BY_SUFFIX = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
 
 
 def enhanced_index() -> bytes:
@@ -103,6 +41,41 @@ INDEX_HTML = enhanced_index()
 
 def _fraction_key(value: float) -> str:
     return f"{value:.9f}".rstrip("0").rstrip(".")
+
+
+def _public_batch(job: dict) -> dict:
+    value = BATCH.public(job)
+    value["source_count"] = len(job.get("sources", []))
+    value["source_names"] = [
+        str(item.get("name", f"frame-{index + 1}.png"))
+        for index, item in enumerate(job.get("sources", []))
+    ]
+    return value
+
+
+def _source_info(job_id: str, index: int) -> tuple[Path, str, str] | None:
+    batch = BATCH.get(job_id)
+    if batch:
+        sources = list(batch.get("sources", []))
+        if index < 0 or index >= len(sources):
+            return None
+        source = sources[index]
+        path = BATCH._job_dir(job_id) / str(source.get("path", ""))
+        name = str(source.get("name", f"frame-{index + 1}.png"))
+        mime = MIME_BY_SUFFIX.get(Path(name).suffix.lower(), "application/octet-stream")
+        return (path, name, mime) if path.is_file() else None
+
+    job = OPENAI.get(job_id)
+    if not job:
+        return None
+    sources = list(job.get("sources", []))
+    if index < 0 or index >= len(sources):
+        return None
+    source = sources[index]
+    path = OPENAI._job_dir(job_id) / str(source.get("path", ""))
+    original = Path(str(source.get("name", f"frame-{index + 1}.png")))
+    name = original.with_suffix(".png").name
+    return (path, name, "image/png") if path.is_file() else None
 
 
 def attempt_path(job_id: str, fraction: float, attempt_number: int) -> Path | None:
@@ -193,7 +166,7 @@ def reopen_for_retry(
         OPENAI._save(job)
 
     OPENAI._start(job_id)
-    return OPENAI.public(job)
+    return OPENAI.public(OPENAI.get(job_id) or job)
 
 
 def estimate_request(payload: dict, frame_count: int, width: int, height: int) -> dict:
@@ -208,15 +181,18 @@ def estimate_request(payload: dict, frame_count: int, width: int, height: int) -
     if segments > 1:
         estimate["segments"] = segments
         estimate["frames"] = int(estimate.get("frames", 1)) * segments
-        estimate["attempts"] = int(estimate.get("attempts", 1)) * segments
-        estimate["maximum"] = float(estimate.get("maximum", 0.0)) * segments
+        if not estimate.get("budget_driven"):
+            estimate["attempts"] = int(estimate.get("attempts", 1)) * segments
+            estimate["maximum"] = float(estimate.get("maximum", 0.0)) * segments
+        else:
+            estimate["maximum"] = max(0.0, float(payload.get("max_spend_usd", 0.0) or 0.0))
     else:
         estimate["segments"] = 1
     return estimate
 
 
 class Handler(legacy.Handler):
-    server_version = "AnimAlignWebP/3.2-openai"
+    server_version = "AnimAlignWebP/3.3-openai"
 
     def read_json_body(self, max_bytes: int = 1024 * 1024):
         try:
@@ -256,13 +232,33 @@ class Handler(legacy.Handler):
             job_id = query.get("id", [""])[0]
             batch = BATCH.get(job_id)
             if batch:
-                self.send_json(200, BATCH.public(batch))
+                self.send_json(200, _public_batch(batch))
                 return
             job = OPENAI.get(job_id)
             if not job:
                 self.send_json(404, {"error": "Unknown OpenAI interpolation job."})
                 return
             self.send_json(200, OPENAI.public(job))
+            return
+
+        if path == "/openai/source":
+            job_id = query.get("id", [""])[0]
+            try:
+                index = int(query.get("index", [""])[0])
+            except ValueError:
+                self.send_text(400, "Invalid source-frame index.")
+                return
+            info = _source_info(job_id, index)
+            if not info:
+                self.send_text(404, "OpenAI job source frame not found.")
+                return
+            source_path, name, mime = info
+            self.send_bytes(
+                200,
+                source_path.read_bytes(),
+                mime,
+                {"Content-Disposition": f'inline; filename="{Path(name).name}"'},
+            )
             return
 
         if path == "/openai/result":
@@ -333,7 +329,9 @@ class Handler(legacy.Handler):
                     raise ValueError("openai_request must be a JSON object.")
                 scope = str(request.get("scope", "pair")).lower()
                 if scope in {"range", "all"}:
-                    job = BATCH.create(selected, request)
+                    created = BATCH.create(selected, request)
+                    batch = BATCH.get(str(created["id"]))
+                    job = _public_batch(batch) if batch else created
                 else:
                     request["scope"] = "pair"
                     job = OPENAI.create(selected, request)
@@ -364,9 +362,35 @@ class Handler(legacy.Handler):
                         if max_spend_value is not None and max_spend_value > 0:
                             remaining = max(0.0, max_spend_value - spent)
                         reopen_for_retry(child_id, feedback, remaining, target_value)
-                    result = BATCH.resume(job_id, max_spend_value)
+                    BATCH.resume(job_id, max_spend_value)
+                    refreshed = BATCH.get(job_id)
+                    result = _public_batch(refreshed) if refreshed else {"id": job_id, "status": "queued"}
                 else:
                     result = reopen_for_retry(job_id, feedback, max_spend_value, target_value)
+                self.send_json(202, result)
+            except KeyError:
+                self.send_json(404, {"error": "Unknown OpenAI interpolation job."})
+            except Exception as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
+
+        if path == "/openai/accept":
+            try:
+                payload = self.read_json_body()
+                job_id = str(payload.get("job_id", ""))
+                target = payload.get("target_fraction")
+                target_value = None if target is None else float(target)
+                batch = BATCH.get(job_id)
+                if batch:
+                    child_id = BATCH.current_child(job_id)
+                    if not child_id:
+                        raise ValueError("This batch has no current generated frame to accept.")
+                    OPENAI.accept_latest(child_id, target_value)
+                    BATCH.resume(job_id)
+                    refreshed = BATCH.get(job_id)
+                    result = _public_batch(refreshed) if refreshed else {"id": job_id, "status": "queued"}
+                else:
+                    result = OPENAI.accept_latest(job_id, target_value)
                 self.send_json(202, result)
             except KeyError:
                 self.send_json(404, {"error": "Unknown OpenAI interpolation job."})
