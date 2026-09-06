@@ -193,6 +193,47 @@ def _analysis_update(job_id: str, analysis_id: str, **changes):
     return state
 
 
+def _stage_analysis_sources(
+    job_id: str,
+    analysis_id: str,
+    uploads: list[tuple[str, bytes]],
+) -> tuple[list[Path], list[dict]]:
+    """Persist an analysis-only source snapshot without touching render sources."""
+    GLOBAL.ensure(job_id)
+    root = GLOBAL.job_dir(job_id) / "analysis" / analysis_id / "source"
+    root.mkdir(parents=True, exist_ok=False)
+    paths: list[Path] = []
+    sources: list[dict] = []
+    try:
+        for index, (name, payload) in enumerate(uploads):
+            suffix = Path(name).suffix.lower() or ".bin"
+            path = root / f"{index:06d}{suffix}"
+            path.write_bytes(payload)
+            paths.append(path)
+            sources.append(
+                {
+                    "index": index,
+                    "name": Path(name).name,
+                    "path": str(path.relative_to(GLOBAL.job_dir(job_id))),
+                    "size": len(payload),
+                }
+            )
+        return paths, sources
+    except Exception:
+        shutil.rmtree(root.parent, ignore_errors=True)
+        raise
+
+
+def _analysis_paths(job_id: str, analysis: dict) -> list[Path]:
+    job_dir = GLOBAL.job_dir(job_id)
+    sources = list(analysis.get("sources", []))
+    return [job_dir / str(item.get("path", "")) for item in sources]
+
+
+def _cleanup_analysis_snapshot(job_id: str, analysis_id: str) -> None:
+    shutil.rmtree(GLOBAL.job_dir(job_id) / "analysis" / analysis_id, ignore_errors=True)
+
+
 def _run_analysis(job_id: str, analysis_id: str, paths: list[Path], settings: dict) -> None:
     _analysis_update(
         job_id,
@@ -223,6 +264,7 @@ def _run_analysis(job_id: str, analysis_id: str, paths: list[Path], settings: di
             message="Analysis complete",
             error=None,
             result=result,
+            sources=[],
         )
     except Exception as exc:
         _analysis_update(
@@ -231,7 +273,10 @@ def _run_analysis(job_id: str, analysis_id: str, paths: list[Path], settings: di
             status="error",
             message=str(exc),
             error=str(exc),
+            sources=[],
         )
+    finally:
+        _cleanup_analysis_snapshot(job_id, analysis_id)
 
 
 def _start_analysis(job_id: str, analysis_id: str, paths: list[Path], settings: dict) -> None:
@@ -277,12 +322,19 @@ def _resume_interrupted_analyses() -> None:
         if not isinstance(analysis, dict) or str(analysis.get("status", "")) not in {"queued", "running"}:
             continue
         settings = analysis.get("settings") or job.get("settings")
-        sources = list(job.get("sources", []))
-        if not isinstance(settings, dict) or not sources:
-            continue
         job_id = str(job.get("id", ""))
-        paths = [GLOBAL.job_dir(job_id) / str(item.get("path", "")) for item in sources]
-        if not all(path.is_file() for path in paths):
+        paths = _analysis_paths(job_id, analysis)
+        if not isinstance(settings, dict) or not paths or not all(path.is_file() for path in paths):
+            analysis_id = str(analysis.get("id") or "")
+            if analysis_id:
+                _analysis_update(
+                    job_id,
+                    analysis_id,
+                    status="error",
+                    message="The persisted analysis source snapshot is missing.",
+                    error="The persisted analysis source snapshot is missing.",
+                    sources=[],
+                )
             continue
         analysis_id = str(analysis.get("id") or uuid.uuid4().hex)
         _analysis_update(
@@ -464,8 +516,9 @@ class Handler(legacy.Handler):
                 settings = _settings_from_fields(fields)
                 requested = str(fields.get("global_job_id", "")).strip().lower()
                 job_id = requested or GLOBAL.new_id()
-                _, paths = GLOBAL.save_sources(job_id, selected, settings)
+                GLOBAL.ensure(job_id)
                 analysis_id = uuid.uuid4().hex
+                paths, sources = _stage_analysis_sources(job_id, analysis_id, selected)
                 GLOBAL.update(
                     job_id,
                     analysis={
@@ -475,6 +528,7 @@ class Handler(legacy.Handler):
                         "message": "Analysis upload received and persisted",
                         "error": None,
                         "settings": settings,
+                        "sources": sources,
                         "result": None,
                     },
                 )
@@ -523,7 +577,7 @@ def main():
     for name in ("rife", "amt", "eden", "speed"):
         print(f"{name.upper():<12} {'ready' if statuses.get(name, {}).get('ready') else 'not installed'}")
     print("Global jobs:  durable with no automatic expiry")
-    print("Analysis:     durable background jobs with reconnectable progress")
+    print("Analysis:     durable background jobs with isolated source snapshots")
     print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()
