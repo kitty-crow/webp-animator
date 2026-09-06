@@ -5,3 +5,6 @@ venv/
 .rife-venv/
 third_party/
 .DS_Store
+.env
+.openai-jobs/
+openai_bridge/node_modules/
