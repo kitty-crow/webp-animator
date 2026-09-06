@@ -39,17 +39,17 @@ def main():
         def generate(a, b):
             return interpolate_pair(torch, model, a, b, 0.5)
 
-        def save(image):
+        def save(image, t):
             nonlocal counter, completed
             path = output_dir / f"{task_index:04d}_{counter:04d}.png"
             counter += 1
             image.save(path)
             completed += 1
             print(f"PROGRESS {completed} {max(1, total_expected)}", flush=True)
-            return str(path)
+            return {"path": str(path), "t": float(t)}
 
         threshold = task.get("threshold")
-        paths = recursive_midpoints(
+        frames = recursive_midpoints(
             first,
             second,
             depth=max(0, int(task.get("depth", 1))),
@@ -58,7 +58,7 @@ def main():
             save_midpoint=save,
             alpha_threshold=int(task.get("alpha_threshold", 8)),
         )
-        result_tasks.append({"id": task.get("id", str(task_index)), "frames": paths})
+        result_tasks.append({"id": task.get("id", str(task_index)), "frames": frames})
         _release_cuda(torch)
         gc.collect()
 
