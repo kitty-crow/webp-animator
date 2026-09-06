@@ -3,6 +3,9 @@ __pycache__/
 .venv/
 venv/
 .rife-venv/
+.amt-venv/
+.eden-venv/
+.speed-venv/
 third_party/
 .webp-jobs/
 .DS_Store

@@ -9,6 +9,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import app as legacy
+from engine_backends import engine_status
+from engine_pipeline import process_job as process_job_with_engines
 from frame1_optimizer import find_best_scale_and_translation as fast_find_best_scale_and_translation
 from global_jobs import GlobalJobStore
 
@@ -16,6 +18,7 @@ ROOT = Path(__file__).resolve().parent
 GLOBAL = GlobalJobStore(ROOT)
 WORKSPACE_FRAGMENT = (ROOT / "workspace_ui" / "fragment.html").read_text(encoding="utf-8")
 WORKSPACE_SCRIPT = (ROOT / "workspace_ui" / "workspace.js").read_bytes()
+ENGINE_SCRIPT = (ROOT / "engine_ui.js").read_bytes()
 
 MIME_BY_SUFFIX = {
     ".png": "image/png",
@@ -36,7 +39,7 @@ def enhanced_index() -> bytes:
     html = html.replace(marker, WORKSPACE_FRAGMENT + "\n\n" + marker, 1)
     html = html.replace(
         "</body>",
-        '  <script src="/workspace-ui.js"></script>\n</body>',
+        '  <script src="/engine-ui.js"></script>\n  <script src="/workspace-ui.js"></script>\n</body>',
         1,
     )
     return html.encode("utf-8")
@@ -75,6 +78,7 @@ def _persistent_set_job(job_id: str, **changes):
 legacy.get_job = _persistent_get_job
 legacy.set_job = _persistent_set_job
 legacy.clean_old_jobs = lambda: None
+legacy.process_job = lambda job_id, paths, settings: process_job_with_engines(legacy, job_id, paths, settings)
 
 
 def _settings_from_fields(fields: dict[str, str]) -> dict:
@@ -86,8 +90,19 @@ def _settings_from_fields(fields: dict[str, str]) -> dict:
     if rife_multiplier not in {1, 2, 4, 8}:
         rife_multiplier = 1
 
+    raw_interpolator = str(fields.get("interpolator", "")).strip().lower()
+    if raw_interpolator in {"none", "rife", "amt"}:
+        interpolator = raw_interpolator
+    else:
+        # Backward compatibility for persisted jobs created before the selector split.
+        interpolator = "rife" if rife_multiplier > 1 else "none"
+
+    frame_generator = str(fields.get("frame_generator", "none")).strip().lower()
+    if frame_generator not in {"none", "eden", "speed"}:
+        frame_generator = "none"
+
     geometry_mode = fields.get("geometry_mode", "sequential")
-    if geometry_mode not in {"sequential", "fit_previous", "fix_first"}:
+    if geometry_mode not in {"none", "sequential", "fit_previous", "fix_first"}:
         geometry_mode = "sequential"
     if fields.get("shrink_larger") == "on" and geometry_mode == "sequential":
         geometry_mode = "fit_previous"
@@ -102,12 +117,15 @@ def _settings_from_fields(fields: dict[str, str]) -> dict:
         "lossy": fields.get("lossy") == "on",
         "geometry_mode": geometry_mode,
         "rife_multiplier": rife_multiplier,
+        "interpolator": interpolator,
+        "frame_generator": frame_generator,
     }
 
 
 def _run_global_render(job_id: str, paths: list[Path], settings: dict) -> None:
     job_dir = GLOBAL.job_dir(job_id)
     shutil.rmtree(job_dir / "aligned", ignore_errors=True)
+    shutil.rmtree(job_dir / "generated", ignore_errors=True)
     shutil.rmtree(job_dir / "interpolated", ignore_errors=True)
     try:
         (job_dir / "animation.webp").unlink(missing_ok=True)
@@ -151,7 +169,7 @@ def _resume_interrupted_jobs() -> None:
 
 
 class Handler(legacy.Handler):
-    server_version = "AnimAlignWebP/5.0-persistent"
+    server_version = "AnimAlignWebP/5.1-multiengine"
 
     def read_json_body(self, max_bytes: int = 1024 * 1024) -> dict:
         try:
@@ -182,6 +200,14 @@ class Handler(legacy.Handler):
 
         if path == "/workspace-ui.js":
             self.send_bytes(200, WORKSPACE_SCRIPT, "text/javascript; charset=utf-8")
+            return
+
+        if path == "/engine-ui.js":
+            self.send_bytes(200, ENGINE_SCRIPT, "text/javascript; charset=utf-8")
+            return
+
+        if path == "/engine-status":
+            self.send_json(200, engine_status())
             return
 
         if path == "/job":
@@ -294,12 +320,15 @@ class Handler(legacy.Handler):
 
 def main():
     _resume_interrupted_jobs()
-    ready, _, _, _ = legacy.rife_paths()
+    statuses = engine_status()
     server = ThreadingHTTPServer((legacy.HOST, legacy.PORT), Handler)
     print(f"WebP Animator persistent server listening on http://{legacy.HOST}:{legacy.PORT}")
     print(f"Local access: http://127.0.0.1:{legacy.PORT}")
     print(f"LAN access:   http://<this-machine-LAN-IP>:{legacy.PORT}")
-    print(f"RIFE:         {'ready' if ready else 'not installed'}")
+    print("Engines:      " + " · ".join(
+        f"{name.upper()} {'ready' if info['ready'] else 'not installed'}"
+        for name, info in statuses.items()
+    ))
     print("Global jobs:  durable with no automatic expiry")
     print("Press Ctrl+C to stop.")
     try:

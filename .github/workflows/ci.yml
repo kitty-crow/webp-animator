@@ -18,14 +18,30 @@ jobs:
       - name: Install Python dependencies
         run: python -m pip install -r requirements.txt
 
-      - name: Check Python syntax and persistent app import
+      - name: Check Python and browser syntax
         run: |
-          python -m py_compile app.py app_all.py global_jobs.py anim_align_webp.py frame1_optimizer.py rife_worker.py setup_rife.py
+          python -m py_compile app.py app_all.py global_jobs.py anim_align_webp.py frame1_optimizer.py rife_worker.py setup_rife.py engine_backends.py engine_pipeline.py worker_frame_common.py amt_worker.py eden_worker.py speed_worker.py setup_engine_common.py setup_amt.py setup_eden.py setup_speed.py
+          node --check engine_ui.js
           python - <<'PY'
           import app_all
           assert b"Recoverable job" in app_all.INDEX_HTML
           assert b"Final WebP preview" in app_all.INDEX_HTML
           assert b"workspace-ui.js" in app_all.INDEX_HTML
+          assert b"engine-ui.js" in app_all.INDEX_HTML
+
+          settings = app_all._settings_from_fields({
+              "geometry_mode": "none",
+              "interpolator": "amt",
+              "frame_generator": "speed",
+              "rife_multiplier": "4",
+          })
+          assert settings["geometry_mode"] == "none"
+          assert settings["interpolator"] == "amt"
+          assert settings["frame_generator"] == "speed"
+          assert settings["rife_multiplier"] == 4
+
+          legacy = app_all._settings_from_fields({"rife_multiplier": "4"})
+          assert legacy["interpolator"] == "rife"
           PY
 
       - name: Test durable jobs and frame-1 optimiser
