@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 import numpy as np
-from PIL import Image, features
+from PIL import Image, ImageChops, features
 
 
 @dataclass(frozen=True)
@@ -416,6 +416,40 @@ def render_union_canvas(
     return rendered, (width, height), origin
 
 
+def _frames_identical(first: Image.Image, second: Image.Image) -> bool:
+    """Return True only when every RGBA channel is byte-for-byte equivalent."""
+    if first.size != second.size:
+        return False
+
+    difference = ImageChops.difference(first.convert("RGBA"), second.convert("RGBA"))
+    return not any(channel.getbbox() for channel in difference.split())
+
+
+def _coalesce_identical_frames(
+    frames: Sequence[Image.Image],
+    duration_ms: int,
+) -> tuple[list[Image.Image], list[int]]:
+    """
+    Merge consecutive identical display frames without changing playback time.
+
+    The animation encoder cannot make an identical frame smaller than not storing
+    it at all. Its duration is therefore folded into the preceding frame.
+    """
+    encoded_frames: list[Image.Image] = [frames[0]]
+    durations = [duration_ms]
+    previous = frames[0]
+
+    for frame in frames[1:]:
+        if _frames_identical(previous, frame):
+            durations[-1] += duration_ms
+            continue
+        encoded_frames.append(frame)
+        durations.append(duration_ms)
+        previous = frame
+
+    return encoded_frames, durations
+
+
 def save_webp(
     frames: Sequence[Image.Image],
     output: Path,
@@ -430,16 +464,23 @@ def save_webp(
 
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    frames[0].save(
+    encoded_frames, durations = _coalesce_identical_frames(frames, duration_ms)
+
+    encoded_frames[0].save(
         output,
         format="WEBP",
         save_all=True,
-        append_images=list(frames[1:]),
-        duration=duration_ms,
+        append_images=list(encoded_frames[1:]),
+        duration=durations if len(encoded_frames) > 1 else durations[0],
         loop=loop,
         lossless=lossless,
         quality=quality,
         method=6,
+        # Let libwebp's animation encoder minimise frame rectangles/deltas and
+        # avoid inserting size-expensive keyframes. Callers still supply complete
+        # composited frames, so blend/disposal semantics remain encoder-managed
+        # and visually exact when lossless=True.
+        minimize_size=True,
     )
 
 
