@@ -5,17 +5,21 @@ import threading
 
 _state = threading.local()
 _installed = False
+_ENGINE_NOUN = {
+    "EDEN": "frame",
+    "SPEED": "frame",
+    "RIFE": "step",
+    "AMT": "step",
+}
 
 
 def install(advanced_pipeline_module) -> None:
     """Preserve worker x/y progress in the persistent job status.
 
-    Generator workers already print ``PROGRESS current total``. The temporal
-    pipeline converts those values into a fractional progress callback, which is
-    useful for the main progress bar but used to discard the concrete frame count.
-    This adapter keeps the existing percentage mapping intact while making the
-    synchronous legacy.set_job call inside that callback aware of the worker's
-    current/total counts.
+    Every temporal worker prints ``PROGRESS current total``. The temporal pipeline
+    still uses the derived fraction for the main percentage bar, while this adapter
+    keeps the concrete count visible in the status message. Generator engines use
+    ``frame X/Y``; interpolators use ``step X/Y``.
     """
     global _installed
     if _installed:
@@ -28,7 +32,8 @@ def install(advanced_pipeline_module) -> None:
     original_set_job = legacy.set_job
 
     def run_process(command, *, cwd, progress_callback=None, label: str):
-        if progress_callback is None or str(label).upper() not in {"SPEED", "EDEN"}:
+        engine = str(label).upper()
+        if progress_callback is None or engine not in _ENGINE_NOUN:
             return original_run_process(
                 command,
                 cwd=cwd,
@@ -37,7 +42,7 @@ def install(advanced_pipeline_module) -> None:
             )
 
         def counted_progress(current, total):
-            _state.engine = str(label).upper()
+            _state.engine = engine
             _state.current = max(0, int(current))
             _state.total = max(1, int(total))
             try:
@@ -59,16 +64,17 @@ def install(advanced_pipeline_module) -> None:
         current = getattr(_state, "current", None)
         total = getattr(_state, "total", None)
         message = changes.get("message")
+        noun = _ENGINE_NOUN.get(engine)
         if (
-            engine in {"SPEED", "EDEN"}
+            noun
             and current is not None
             and total is not None
             and isinstance(message, str)
             and engine in message.upper()
-            and "FRAME " not in message.upper()
+            and f"{noun.upper()} " not in message.upper()
         ):
             changes = dict(changes)
-            changes["message"] = f"{message} · frame {current}/{total}"
+            changes["message"] = f"{message} · {noun} {current}/{total}"
         return original_set_job(job_id, **changes)
 
     advanced_pipeline_module._run_process = run_process
