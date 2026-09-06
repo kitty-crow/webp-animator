@@ -9,10 +9,11 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from openai_interrogator import ACTIVE_STATES, OpenAIJobManager, _fraction_key, make_contact_sheet
+from openai_interrogator import ACTIVE_STATES, BridgeClient, OpenAIJobManager, _fraction_key, make_contact_sheet
 
 
 AUTO_BUDGET_HARD_ATTEMPT_LIMIT = 32
+MAX_AUDITOR_OVERRIDES = 32
 
 
 def _atomic_manifest(path: Path, value: dict[str, Any]) -> None:
@@ -38,17 +39,88 @@ def _atomic_manifest(path: Path, value: dict[str, Any]) -> None:
             pass
 
 
+def _override_key(value: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(value.get("type", "")).strip().casefold(),
+        str(value.get("region", "")).strip().casefold(),
+        str(value.get("description", "")).strip().casefold(),
+    )
+
+
+def _merge_overrides(existing: list[Any], learned: list[Any]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for raw in [*existing, *learned]:
+        if not isinstance(raw, dict):
+            continue
+        item = {
+            "type": str(raw.get("type", "user_accepted_issue")).strip() or "user_accepted_issue",
+            "region": str(raw.get("region", "whole frame")).strip() or "whole frame",
+            "description": str(raw.get("description", "")).strip(),
+            "severity": max(0, min(100, int(raw.get("severity", 0) or 0))),
+        }
+        if raw.get("learned_from_target") is not None:
+            item["learned_from_target"] = float(raw["learned_from_target"])
+        if raw.get("learned_from_attempt") is not None:
+            item["learned_from_attempt"] = int(raw["learned_from_attempt"])
+        if not item["description"]:
+            continue
+        key = _override_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+    return merged[-MAX_AUDITOR_OVERRIDES:]
+
+
+class AuditorAwareBridgeClient(BridgeClient):
+    """Inject job-local user audit preferences only into auditor calls.
+
+    The generator and planner remain unchanged. A manual accept therefore teaches the
+    critic what the user considers acceptable without relaxing unrelated checks.
+    Thread-local state keeps concurrent background jobs isolated from one another.
+    """
+
+    def __init__(self, root: Path, port: int = 18744):
+        super().__init__(root, port)
+        self._audit_context = threading.local()
+
+    def set_auditor_overrides(self, overrides: list[dict[str, Any]] | None) -> None:
+        self._audit_context.overrides = list(overrides or [])
+
+    def request(self, path: str, payload: dict[str, Any] | None, **kwargs):
+        if path == "/audit" and payload is not None:
+            overrides = list(getattr(self._audit_context, "overrides", []) or [])
+            if overrides:
+                payload = dict(payload)
+                original = str(payload.get("user_instruction", "")).strip()
+                learned_text = json.dumps(overrides, ensure_ascii=False, indent=2)
+                preference = (
+                    "AUDITOR JOB-LOCAL USER PREFERENCE OVERRIDE:\n"
+                    "The user explicitly accepted earlier generated frame(s) despite the audit findings below. "
+                    "For this animation job, if the same or substantially equivalent visual issue appears again, "
+                    "treat that specific issue as allowed: do not list it as a violation, do not lower rubric scores "
+                    "because of it, and do not reject a candidate solely because of it. Continue to evaluate every "
+                    "unrelated temporal, structural, semantic, consistency, or instruction error normally. Do not "
+                    "generalise these exceptions beyond the specific findings described.\n"
+                    f"Accepted audit exceptions:\n{learned_text}"
+                )
+                payload["user_instruction"] = f"{original}\n\n{preference}" if original else preference
+        return super().request(path, payload, **kwargs)
+
+
 class EnhancedOpenAIJobManager(OpenAIJobManager):
     """Runtime OpenAI worker used by the web app.
 
-    Adds Windows-safe manifests, complete sequence context, a user override for
-    auditor rejections, and a budget-driven automatic retry policy. The underlying
+    Adds Windows-safe manifests, complete sequence context, user overrides that teach
+    subsequent audits, and a budget-driven automatic retry policy. The underlying
     planner/generator/auditor implementation remains in OpenAIJobManager.
     """
 
     def __init__(self, root: Path):
         self._manifest_io_lock = threading.RLock()
         super().__init__(root)
+        self.bridge = AuditorAwareBridgeClient(root)
 
     def get(self, job_id: str):
         try:
@@ -92,6 +164,7 @@ class EnhancedOpenAIJobManager(OpenAIJobManager):
         if retry_policy == "auto_budget" and float(normal.get("max_spend_usd", 0.0)) <= 0:
             raise ValueError("Auto-retry-until-budget requires a maximum OpenAI spend greater than $0.")
         normal["retry_policy"] = retry_policy
+        normal["auditor_overrides"] = _merge_overrides([], list(request.get("auditor_overrides", []) or []))
         return normal
 
     def estimate(self, request: dict[str, Any], frame_count: int, width: int, height: int) -> dict[str, Any]:
@@ -121,10 +194,23 @@ class EnhancedOpenAIJobManager(OpenAIJobManager):
             accepted["accepted_by_user"] = bool(internal.get("accepted_by_user"))
         value["source_count"] = len(job.get("sources", []))
         value["source_names"] = [str(item.get("name", f"frame-{index + 1}.png")) for index, item in enumerate(job.get("sources", []))]
+        value["auditor_overrides"] = list(job.get("request", {}).get("auditor_overrides", []) or [])
         return value
 
+    def _attempt(self, job_id: str, target: float, preplan: dict[str, Any] | None = None) -> bool:
+        job = self.get(job_id)
+        overrides = list((job or {}).get("request", {}).get("auditor_overrides", []) or [])
+        setter = getattr(self.bridge, "set_auditor_overrides", None)
+        if callable(setter):
+            setter(overrides)
+        try:
+            return super()._attempt(job_id, target, preplan=preplan)
+        finally:
+            if callable(setter):
+                setter([])
+
     def accept_latest(self, job_id: str, target_fraction: float | None = None) -> dict[str, Any]:
-        """Accept the latest generated candidate despite an auditor rejection and continue."""
+        """Accept the latest generated candidate, learn its audit exceptions, and continue."""
         with self._lock_for(job_id):
             job = self.get(job_id)
             if not job:
@@ -163,7 +249,40 @@ class EnhancedOpenAIJobManager(OpenAIJobManager):
 
             latest["accepted"] = True
             latest["accepted_by_user"] = True
-            latest["user_override_reason"] = "Auditor rejection ignored by the user."
+            latest["user_override_reason"] = "Auditor rejection ignored by the user and learned as a job-local audit preference."
+
+            audit = latest.get("audit") if isinstance(latest.get("audit"), dict) else {}
+            learned: list[dict[str, Any]] = []
+            for raw in list(audit.get("violations", []) or []):
+                if not isinstance(raw, dict):
+                    continue
+                learned.append({
+                    "type": str(raw.get("type", "user_accepted_issue")),
+                    "region": str(raw.get("region", "whole frame")),
+                    "description": str(raw.get("description", "")),
+                    "severity": int(raw.get("severity", 0) or 0),
+                    "learned_from_target": float(target_fraction),
+                    "learned_from_attempt": int(latest.get("attempt", 0) or 0),
+                })
+            if not learned:
+                fallback = str(audit.get("corrective_instruction", "")).strip()
+                if fallback:
+                    learned.append({
+                        "type": "user_accepted_audit_rejection",
+                        "region": "whole frame",
+                        "description": fallback,
+                        "severity": 0,
+                        "learned_from_target": float(target_fraction),
+                        "learned_from_attempt": int(latest.get("attempt", 0) or 0),
+                    })
+
+            request = dict(job.get("request", {}))
+            request["auditor_overrides"] = _merge_overrides(
+                list(request.get("auditor_overrides", []) or []),
+                learned,
+            )
+            job["request"] = request
+
             job["accepted"] = [
                 item for item in job.get("accepted", [])
                 if _fraction_key(float(item.get("target_fraction", -1))) != key
@@ -182,7 +301,11 @@ class EnhancedOpenAIJobManager(OpenAIJobManager):
             job["stage"] = "queued"
             job["error"] = None
             job["estimated_next_usd"] = 0.0
-            job["message"] = f"User accepted the generated frame at t={float(target_fraction):.3f}; continuing the job."
+            learned_count = len(request["auditor_overrides"])
+            job["message"] = (
+                f"User accepted the generated frame at t={float(target_fraction):.3f}; "
+                f"the auditor will treat {learned_count} learned issue{'s' if learned_count != 1 else ''} as allowed for the rest of this job."
+            )
             job.get("request", {}).pop("user_feedback", None)
             self._save(job)
 
