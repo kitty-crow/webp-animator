@@ -130,7 +130,7 @@ class OpenAIJobFeatureTests(unittest.TestCase):
             rejected = self.wait(manager, created["id"])
             self.assertEqual(rejected["status"], "needs_review")
 
-            batch_dir = Path(temporary.name) / ".openai-batches" / "a" * 32
+            batch_dir = Path(temporary.name) / ".openai-batches" / ("a" * 32)
             batch_dir.mkdir(parents=True)
             batch_manifest = batch_dir / "job.json"
             batch_manifest.write_text(json.dumps({
