@@ -91,8 +91,7 @@
   function serialiseSettings() {
     const values = {};
     document.querySelectorAll("input, select, textarea").forEach(control => {
-      if (control.type === "file") return;
-      if (["globalRestoreId", "oiRestoreId", "oiFeedback"].includes(control.id)) return;
+      if (control.type === "file" || control.id === "globalRestoreId") return;
       const key = control.id ? `id:${control.id}` : control.name ? `name:${control.name}` : "";
       if (!key) return;
       if (control.type === "checkbox" || control.type === "radio") values[key] = Boolean(control.checked);
@@ -181,7 +180,7 @@
       await dbPut(value);
       jobStatus.textContent = value.outputBlob
         ? "Job saved locally, including the finished WebP. You can close the page and restore it by ID."
-        : "Job saved locally. The server also persists frames once a processing/OpenAI job is submitted.";
+        : "Job saved locally. The server also persists the source frames once a processing job is submitted.";
     } catch (error) {
       jobStatus.textContent = `Job ID is active, but browser storage could not save this snapshot: ${error.message}`;
     }
@@ -294,10 +293,9 @@
         }
       }
 
-      const linkedOpenAI = server?.last_openai_job_id || null;
       jobStatus.textContent = `Restored global job ${id}${server ? ` · server status: ${server.status}` : " · local browser copy"}.`;
       document.dispatchEvent(new CustomEvent("webp-global-job-restored", {
-        detail: { id, metadata: server || null, lastOpenAIJobId: linkedOpenAI },
+        detail: { id, metadata: server || null },
       }));
 
       if (server && ["queued", "running"].includes(server.status)) {
@@ -353,7 +351,7 @@
   const strip = document.getElementById("frameStrip");
   if (strip) new MutationObserver(scheduleSnapshot).observe(strip, { childList: true });
   document.querySelectorAll("input, select, textarea").forEach(control => {
-    if (control.type === "file" || ["globalRestoreId", "oiRestoreId", "oiFeedback"].includes(control.id)) return;
+    if (control.type === "file" || control.id === "globalRestoreId") return;
     control.addEventListener("change", scheduleSnapshot);
   });
 
