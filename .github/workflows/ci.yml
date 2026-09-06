@@ -50,6 +50,10 @@ jobs:
         run: |
           node --check openai_bridge/server.mjs
           node --check openai_ui/interrogator.js
+          node --check test_openai_bridge.mjs
+
+      - name: Test image moderation recovery without OpenAI
+        run: node test_openai_bridge.mjs
 
       - name: Smoke-test local bridge without API calls
         shell: bash
