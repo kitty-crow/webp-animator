@@ -256,6 +256,37 @@ function parseRequestedSize(size) {
   return { width: Number(match[1]), height: Number(match[2]) };
 }
 
+function normaliseGenerationSize(requested) {
+  let width = Number(requested.width);
+  let height = Number(requested.height);
+  if (!(width > 0 && height > 0)) throw new Error("Image dimensions must be positive.");
+
+  const ratio = Math.max(width, height) / Math.min(width, height);
+  if (ratio > 3) {
+    throw new Error(
+      `The source canvas ${width}x${height} exceeds GPT Image's 3:1 aspect-ratio limit. Pad the animation canvas before OpenAI interpolation; the worker will not distort it.`,
+    );
+  }
+
+  const minPixels = 655360;
+  const maxPixels = 8294400;
+  const maxEdge = 3840;
+  let scale = 1;
+  const pixels = width * height;
+  if (pixels < minPixels) scale = Math.sqrt(minPixels / pixels);
+  if (pixels > maxPixels) scale = Math.min(scale, Math.sqrt(maxPixels / pixels));
+  if (Math.max(width, height) * scale > maxEdge) scale = Math.min(scale, maxEdge / Math.max(width, height));
+  width *= scale;
+  height *= scale;
+
+  // GPT Image requires both output edges to be divisible by 16. Round down so a
+  // source such as 2120x2736 becomes 2112x2736 instead of being rejected. Python
+  // restores the generated PNG to the exact source canvas after the API call.
+  width = Math.max(16, Math.floor(width / 16) * 16);
+  height = Math.max(16, Math.floor(height / 16) * 16);
+  return { width, height };
+}
+
 function pngDimensions(base64) {
   const buffer = Buffer.from(base64, "base64");
   const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
@@ -279,13 +310,14 @@ async function runGenerate(payload) {
   const prompt = `${roleInstruction}\n\n${rawPrompt}`;
   const requested = parseRequestedSize(payload.size);
   if (!requested) throw new Error("An exact output size in WIDTHxHEIGHT form is required for animation interpolation.");
+  const apiSize = normaliseGenerationSize(requested);
 
   const form = new FormData();
   form.append("model", model);
   form.append("prompt", prompt);
   form.append("quality", quality);
   form.append("output_format", "png");
-  form.append("size", `${requested.width}x${requested.height}`);
+  form.append("size", `${apiSize.width}x${apiSize.height}`);
   if (payload.transparent !== false) form.append("background", "transparent");
   refs.forEach((ref, index) => {
     form.append("image[]", b64ToBlob(ref.image_b64, ref.mime || "image/png"), `reference-${index + 1}.png`);
@@ -310,9 +342,9 @@ async function runGenerate(payload) {
 
   const dimensions = pngDimensions(imageB64);
   if (!dimensions) throw new Error("OpenAI image edit did not return a valid PNG image.");
-  if (dimensions.width !== requested.width || dimensions.height !== requested.height) {
+  if (dimensions.width !== apiSize.width || dimensions.height !== apiSize.height) {
     throw new Error(
-      `OpenAI returned ${dimensions.width}x${dimensions.height}, but animation interpolation requires exact ${requested.width}x${requested.height} output. The frame was rejected rather than stretched.`,
+      `OpenAI returned ${dimensions.width}x${dimensions.height}, but the valid API request was ${apiSize.width}x${apiSize.height}.`,
     );
   }
 
@@ -321,6 +353,10 @@ async function runGenerate(payload) {
     mime: "image/png",
     width: dimensions.width,
     height: dimensions.height,
+    requested_width: requested.width,
+    requested_height: requested.height,
+    api_width: apiSize.width,
+    api_height: apiSize.height,
     usage: value.usage || null,
     model,
     quality,
@@ -421,7 +457,7 @@ const server = createServer(async (request, response) => {
         key_configured: Boolean(API_KEY),
         openai_schema: true,
         bridge: "openai-interrogator",
-        version: 2,
+        version: 3,
       });
       return;
     }
