@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from PIL import Image
 
+import engine_progress
+
 
 def install(advanced_pipeline_module):
     FrameRecord = advanced_pipeline_module.FrameRecord
@@ -53,3 +55,4 @@ def install(advanced_pipeline_module):
             records[record_index + 1:record_index + 1] = inserted
 
     advanced_pipeline_module._insert_interpolator_results = insert_interpolator_results
+    engine_progress.install(advanced_pipeline_module)
