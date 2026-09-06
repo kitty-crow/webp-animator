@@ -102,7 +102,15 @@
           </label>
 
           <label class="option">
-            Automatic retries per frame
+            Auditor rejection handling
+            <select id="oiRetryPolicy">
+              <option value="manual">Pause for review after configured retries</option>
+              <option value="auto_budget">Auto-retry until accepted or budget is exhausted</option>
+            </select>
+          </label>
+
+          <label class="option" id="oiRetriesWrap">
+            Automatic retries before pausing
             <input id="oiRetries" type="number" value="1" min="0" max="4">
           </label>
 
@@ -182,6 +190,7 @@
           </label>
           <div class="openai-actions">
             <button type="button" id="oiRetry" class="primary">Learn from this attempt and try again</button>
+            <button type="button" id="oiAcceptAnyway">Ignore auditor and continue with this frame</button>
           </div>
         </div>
 
@@ -189,4 +198,5 @@
           <input id="oiRestoreId" type="text" placeholder="Restore by job ID" aria-label="Restore OpenAI job ID">
           <button type="button" id="oiRestore">Restore job</button>
         </div>
+        <div class="hint">Restoring by Job ID reloads server-side status and, when this browser has no frames loaded, restores the source animation from the saved job too.</div>
       </section>
