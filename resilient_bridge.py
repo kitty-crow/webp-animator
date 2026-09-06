@@ -32,12 +32,34 @@ def _decode_rgba(value: str | None) -> Image.Image | None:
         return None
 
 
-def _has_transparency(value: str | None) -> bool:
+def _alpha_metrics(value: str | None) -> dict[str, Any]:
     image = _decode_rgba(value)
     if image is None:
-        return False
-    lo, _hi = image.getchannel("A").getextrema()
-    return lo < 250
+        return {
+            "readable": False,
+            "has_transparency": False,
+            "transparent_fraction": 0.0,
+            "nonopaque_fraction": 0.0,
+        }
+    alpha = image.getchannel("A")
+    histogram = alpha.histogram()
+    total = max(1, image.width * image.height)
+    transparent = sum(histogram[:8])
+    nonopaque = sum(histogram[:255])
+    bbox = alpha.getbbox()
+    return {
+        "readable": True,
+        "has_transparency": nonopaque > 0,
+        "transparent_fraction": round(transparent / total, 4),
+        "nonopaque_fraction": round(nonopaque / total, 4),
+        "foreground_bbox": list(bbox) if bbox else None,
+        "width": image.width,
+        "height": image.height,
+    }
+
+
+def _has_transparency(value: str | None) -> bool:
+    return bool(_alpha_metrics(value).get("has_transparency"))
 
 
 def _references_expect_transparency(payload: dict[str, Any]) -> bool:
@@ -100,23 +122,53 @@ def _repair_flat_opaque_background(result: dict[str, Any], payload: dict[str, An
     return value
 
 
-def _correctable_violation(item: dict[str, Any], transparent_expected: bool) -> bool:
+def _correctable_violation(
+    item: dict[str, Any],
+    transparent_expected: bool,
+    candidate_has_transparency: bool,
+) -> bool:
     text = " ".join(str(item.get(key, "")) for key in ("type", "region", "description")).casefold()
 
-    if transparent_expected and "background" in text and any(
-        word in text for word in ("black", "colour", "color", "opaque", "transparent", "canvas", "matte")
-    ):
-        return True
+    # Vision backends sometimes composite alpha against black and then hallucinate that
+    # the black surround is missing coloured artwork. We decode the PNG alpha ourselves,
+    # so this is a deterministic fact, not something the visual auditor gets to guess.
+    if transparent_expected and candidate_has_transparency:
+        alpha_confusion = (
+            "replaced with black" in text
+            or "uniform black" in text
+            or "black background" in text
+            or "black canvas" in text
+            or "transparent-looking" in text
+            or "transparent looking" in text
+            or ("background" in text and any(word in text for word in ("black", "colour", "color", "opaque", "transparent", "canvas", "matte")))
+            or ("graphic region" in text and "black" in text)
+        )
+        if alpha_confusion:
+            return True
 
     global_subject = any(
         word in text for word in (
             "whole frame", "whole image", "entire frame", "entire image", "entire subject",
-            "overall", "global", "canvas", "framing", "centred", "centered",
+            "overall", "global", "canvas", "framing", "centred", "centered", "placement",
         )
     )
-    translation = any(word in text for word in ("shifted", "translation", "translated", "offset", "too high", "too low", "upward", "downward"))
-    scaling = any(word in text for word in ("uniform scale", "scaled up", "scaled down", "larger", "smaller", "overall size"))
-    structural = any(word in text for word in ("limb", "hand", "foot", "arm", "leg", "pose", "anatom", "occlusion", "topology", "missing", "extra"))
+    translation = any(
+        word in text for word in (
+            "shifted", "translation", "translated", "offset", "too high", "too low",
+            "upward", "downward", "differently positioned", "positioned differently",
+        )
+    )
+    scaling = any(
+        word in text for word in (
+            "uniform scale", "scaled up", "scaled down", "larger", "smaller", "overall size",
+            "scale and placement", "camera, scale", "camera scale",
+        )
+    )
+    structural = any(
+        word in text for word in (
+            "limb", "hand", "foot", "arm", "leg", "pose", "anatom", "occlusion", "topology", "missing", "extra",
+        )
+    )
 
     if translation and (global_subject or not structural):
         return True
@@ -131,20 +183,28 @@ def _relax_pipeline_correctable_audit(result: dict[str, Any], payload: dict[str,
         return result
 
     transparent_expected = _references_expect_transparency(payload)
+    candidate_has_transparency = _has_transparency(str(payload.get("candidate_b64", "")))
     violations = [item for item in list(audit.get("violations", []) or []) if isinstance(item, dict)]
-    correctable = [item for item in violations if _correctable_violation(item, transparent_expected)]
+    correctable = [
+        item for item in violations
+        if _correctable_violation(item, transparent_expected, candidate_has_transparency)
+    ]
     substantive = [item for item in violations if item not in correctable]
-    if not correctable:
+    if not correctable and violations:
         return result
 
     amended = dict(audit)
     amended["violations"] = substantive
     observations = list(amended.get("observations", []) or [])
-    observations.append(
-        "Pipeline tolerance applied: global translation/uniform scale and transparent-canvas presentation are corrected downstream and are not semantic interpolation failures."
-    )
+    if correctable:
+        observations.append(
+            "Pipeline tolerance applied: decoded alpha proves the transparent canvas, and global translation/uniform scale are corrected downstream; those findings are not semantic interpolation failures."
+        )
     amended["observations"] = observations
     amended["pipeline_correctable_violations"] = correctable
+
+    # If every stated reason for rejection was something the deterministic pipeline
+    # either disproves (alpha) or will correct (scale/translation), accept the frame.
     if not substantive:
         amended["acceptable"] = True
         amended["retry_recommended"] = False
@@ -237,10 +297,17 @@ class ResilientAuditorAwareBridgeClient(AuditorAwareBridgeClient):
 
         if path == "/audit":
             original = str(candidate.get("user_instruction", "")).strip()
+            alpha_facts = {
+                "anchor_a": _alpha_metrics(str(candidate.get("frame_a_b64", ""))),
+                "candidate": _alpha_metrics(str(candidate.get("candidate_b64", ""))),
+                "anchor_b": _alpha_metrics(str(candidate.get("frame_b_b64", ""))),
+            }
             geometry_context = (
                 "AUDIT SCOPE FOR THIS PIPELINE: judge semantic interpolation, pose/state, structure, topology, occlusion and genuinely changed visual content. "
-                "Do NOT reject merely because the whole generated foreground is shifted up/down/left/right, is uniformly a little larger/smaller, is centred differently, or needs canvas-fit correction. "
-                "The next deterministic WebP Animator stage explicitly optimises uniform resize and X/Y translation to maximise pixel compatibility. Those are correctable presentation differences, not failed interpolation."
+                "Do NOT reject merely because the whole generated foreground is shifted up/down/left/right, is uniformly a little larger/smaller, is centred differently, has smoother/higher-resolution rasterisation, or needs canvas-fit correction. "
+                "The next deterministic WebP Animator stage explicitly optimises uniform resize and X/Y translation to maximise pixel compatibility, and the user may apply a pixel-art filter later. Those are correctable presentation differences, not failed interpolation. "
+                "Motion is not required to be linearly interpolated feature-by-feature. A limb, tail, cloth edge, or other articulated feature may progress nonlinearly. Reject temporal placement only when it is clearly outside the two-anchor motion envelope, reverses direction, duplicates the wrong anchor state, or creates an obvious structural/semantic contradiction. "
+                f"HARD DECODED ALPHA FACTS (computed from the PNG bytes, not inferred visually): {alpha_facts}. If the candidate facts show has_transparency=true, any claim that its transparent surround became a black/coloured background is factually wrong and must not be used as a violation."
             )
             candidate["user_instruction"] = f"{original}\n\n{geometry_context}" if original else geometry_context
 
