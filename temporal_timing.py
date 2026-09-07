@@ -59,18 +59,20 @@ def install(advanced_pipeline_module):
 
     import app as legacy
     import job_control
+    import live_timeline
     import operation_pipeline
-    import pipeline_live
     import pipeline_settings
     import temporal_repair
     import temporal_v2
+    import timeline_pipeline
 
-    # The ordered pipeline owns the actual temporal pass sequence. The settings
-    # wrapper decodes the UI's pipeline token before it reaches that processor.
-    # ProPainter remains a legacy end-of-render wrapper only for jobs without an
-    # explicit pipeline. job_control stays outermost for hard Stop support.
+    # The ordered pipeline owns the temporal pass sequence. timeline_pipeline wraps
+    # each pass so a canonical current-animation timeline is published, while
+    # live_timeline merges in-progress worker output into the right slots and makes
+    # ProPainter replace repaired slots instead of appending duplicate frame cards.
     operation_pipeline.install(temporal_v2)
+    timeline_pipeline.install(operation_pipeline)
     pipeline_settings.install(temporal_v2)
     temporal_repair.install(temporal_v2)
-    pipeline_live.install(job_control)
     job_control.install(legacy, advanced_pipeline_module, temporal_v2)
+    live_timeline.install(job_control)
