@@ -9,6 +9,8 @@ from typing import Sequence
 
 from PIL import Image
 
+import job_control
+
 ROOT = Path(__file__).resolve().parent
 REPAIR_TOKEN = "repair:propainter"
 _tls = threading.local()
@@ -92,6 +94,7 @@ def repair_images(
             "engine": "propainter",
         }
 
+    job_control.raise_if_cancelled()
     ready, python, source = propainter_paths()
     if not ready:
         raise RuntimeError(
@@ -136,21 +139,29 @@ def repair_images(
         text=True,
         bufsize=1,
     )
+    registered_job = job_control.register_process(process)
     tail: list[str] = []
-    assert process.stdout is not None
-    for raw in process.stdout:
-        line = raw.strip()
-        if line.startswith("PROGRESS "):
-            try:
-                _, current, total = line.split()
-                if progress:
-                    progress(int(current), max(1, int(total)))
-            except Exception:
-                pass
-        elif line:
-            tail.append(line)
-            tail = tail[-40:]
-    code = process.wait()
+    try:
+        assert process.stdout is not None
+        for raw in process.stdout:
+            job_control.raise_if_cancelled(registered_job)
+            line = raw.strip()
+            if line.startswith("PROGRESS "):
+                try:
+                    _, current, total = line.split()
+                    if progress:
+                        progress(int(current), max(1, int(total)))
+                except job_control.JobCancelled:
+                    raise
+                except Exception:
+                    pass
+            elif line:
+                tail.append(line)
+                tail = tail[-40:]
+        code = process.wait()
+        job_control.raise_if_cancelled(registered_job)
+    finally:
+        job_control.unregister_process(process, registered_job)
     if code != 0:
         details = "\n".join(tail[-16:]) or "No ProPainter worker output."
         raise RuntimeError(f"ProPainter temporal repair failed:\n{details}")
@@ -221,6 +232,7 @@ def install(temporal_v2_module):
         job_id = getattr(_tls, "job_id", "")
 
         def report(current, total):
+            job_control.raise_if_cancelled(job_id)
             if legacy is None or not job_id:
                 return
             fraction = current / max(1, total)
