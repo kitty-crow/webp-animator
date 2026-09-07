@@ -14,6 +14,7 @@
   const resultPreview = $("globalResultPreview");
   const resultInfo = $("globalResultInfo");
   const resultDownload = $("globalResultDownload");
+  const continueButton = $("globalContinueJob");
 
   const CURRENT_KEY = "webp-animator-global-job-v1";
   const DB_NAME = "webp-animator-jobs";
@@ -21,6 +22,7 @@
   const STORE = "jobs";
   let globalJobId = "";
   let resultObjectUrl = "";
+  let resultBlob = null;
   let saveTimer = null;
   let restoring = false;
 
@@ -129,6 +131,7 @@
   function clearResultView() {
     if (resultObjectUrl) URL.revokeObjectURL(resultObjectUrl);
     resultObjectUrl = "";
+    resultBlob = null;
     resultPreview.removeAttribute("src");
     resultDownload.removeAttribute("href");
     resultPanel.hidden = true;
@@ -140,6 +143,7 @@
 
   function showResultBlob(blob, source = "saved") {
     clearResultView();
+    resultBlob = blob;
     resultObjectUrl = URL.createObjectURL(blob);
     resultPreview.src = resultObjectUrl;
     resultDownload.href = resultObjectUrl;
@@ -325,12 +329,116 @@
         link.remove();
       }
     } catch (error) {
+      resultBlob = null;
       jobStatus.textContent = `WebP finished, but caching the local copy failed: ${error.message}. The server copy remains recoverable by Job ID.`;
       const href = `/download?id=${encodeURIComponent(jobId)}`;
       resultDownload.href = href;
       resultPanel.hidden = false;
       try { downloadLink.href = href; downloadLink.classList.add("visible"); } catch {}
     }
+  }
+
+  async function getFinishedWebPBlob() {
+    if (resultBlob instanceof Blob && resultBlob.size) return resultBlob;
+    if (!validJobId(globalJobId)) throw new Error("There is no finished job to continue from.");
+    const response = await fetch(`/download?id=${encodeURIComponent(globalJobId)}`, { cache: "no-store" });
+    if (!response.ok) throw new Error(await response.text() || "Could not retrieve the finished WebP.");
+    const blob = await response.blob();
+    if (!blob.size) throw new Error("The finished WebP is empty.");
+    return blob;
+  }
+
+  async function continueAsNewJob() {
+    if (!continueButton) return;
+    const sourceJobId = globalJobId;
+    continueButton.disabled = true;
+    const previousText = continueButton.textContent;
+    continueButton.textContent = "Preparing frames…";
+    try {
+      jobStatus.textContent = "Decoding the finished WebP into editable frames…";
+      const blob = await getFinishedWebPBlob();
+      const webpFile = new File(
+        [blob],
+        `continued-${sourceJobId.slice(0, 8) || "animation"}.webp`,
+        { type: "image/webp", lastModified: Date.now() },
+      );
+      const extracted = await extractWebP(webpFile);
+      const decoded = (extracted.frames || []).map(extractedFrame => {
+        const file = base64ToFile(
+          extractedFrame.data,
+          extractedFrame.name,
+          extractedFrame.mime || "image/png",
+        );
+        return makeFrameItem(file, extractedFrame.name);
+      });
+      if (!decoded.length) throw new Error("The finished WebP did not contain any decodable frames.");
+
+      await newJob();
+      frames = decoded;
+
+      if (extracted.suggested_duration && Number(extracted.suggested_duration) > 0) {
+        duration.value = String(extracted.suggested_duration);
+        try { updateDurationHint(); } catch {}
+      }
+
+      // Finished frames already share their final animation canvas. Do not silently
+      // re-register them when the new continuation job is first rendered.
+      const noneGeometry = geometryMode?.querySelector?.('option[value="none"]');
+      if (noneGeometry) {
+        geometryMode.value = "none";
+        geometryMode.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+
+      renderFrames();
+      await snapshot(null);
+      jobStatus.textContent = `Created new job ${globalJobId} from ${decoded.length} finished frame${decoded.length === 1 ? "" : "s"}. Original job ${sourceJobId} is unchanged.`;
+      status.textContent = `Continuation ready: ${decoded.length} frame${decoded.length === 1 ? "" : "s"} loaded from the finished WebP.`;
+      document.dispatchEvent(new CustomEvent("webp-global-job-continued", {
+        detail: { id: globalJobId, sourceJobId, frameCount: decoded.length },
+      }));
+    } catch (error) {
+      jobStatus.textContent = `Could not continue from the finished WebP: ${error.message}`;
+    } finally {
+      continueButton.disabled = false;
+      continueButton.textContent = previousText;
+    }
+  }
+
+  function downloadFrameItem(item, index) {
+    if (!item?.url) return;
+    const fallback = `frame-${String(index + 1).padStart(4, "0")}.png`;
+    const name = String(item.displayName || item.file?.name || fallback).trim() || fallback;
+    const link = document.createElement("a");
+    link.href = item.url;
+    link.download = name;
+    link.style.display = "none";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  }
+
+  function decorateFrameDownloadButtons() {
+    const cards = document.querySelectorAll("#frameStrip .frame-card");
+    cards.forEach((card, index) => {
+      if (card.querySelector('[data-action="download-frame"]')) return;
+      const item = frames.find(frame => frame.id === card.dataset.id) || frames[index];
+      if (!item) return;
+      const actions = card.querySelector(".frame-actions");
+      if (!actions) return;
+      actions.style.gridTemplateColumns = "repeat(4, minmax(0, 1fr))";
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.action = "download-frame";
+      button.textContent = "↓";
+      button.title = `Download frame ${index + 1}`;
+      button.setAttribute("aria-label", `Download frame ${index + 1}`);
+      button.addEventListener("click", event => {
+        event.preventDefault();
+        event.stopPropagation();
+        downloadFrameItem(item, index);
+      });
+      actions.appendChild(button);
+    });
   }
 
   const originalShowDownload = typeof showDownload === "function" ? showDownload : null;
@@ -347,9 +455,16 @@
   });
   newButton.addEventListener("click", () => newJob());
   restoreButton.addEventListener("click", () => restoreJob());
+  continueButton?.addEventListener("click", () => continueAsNewJob());
 
   const strip = document.getElementById("frameStrip");
-  if (strip) new MutationObserver(scheduleSnapshot).observe(strip, { childList: true });
+  if (strip) {
+    new MutationObserver(() => {
+      scheduleSnapshot();
+      decorateFrameDownloadButtons();
+    }).observe(strip, { childList: true });
+    decorateFrameDownloadButtons();
+  }
   document.querySelectorAll("input, select, textarea").forEach(control => {
     if (control.type === "file" || control.id === "globalRestoreId") return;
     control.addEventListener("change", scheduleSnapshot);
@@ -360,6 +475,7 @@
     persistNow: snapshot,
     restore: restoreJob,
     cacheResult: cacheServerResult,
+    continueAsNewJob,
   };
 
   (async () => {
