@@ -41,4 +41,46 @@
             <button type="button" id="globalContinueJob">Continue as new job</button>
           </div>
         </div>
+
+        <!-- Exists before workspace.js runs so IndexedDB can save/restore it. JS
+             moves the same control into the temporal options once advanced_ui has
+             built them. -->
+        <label id="temporalRepairControl" class="wide" hidden>
+          <span><input id="temporalRepairAudit" type="checkbox"> Audit + repair every generated/interpolated frame</span>
+          <span class="hint">CUDA ProPainter temporal repair. Original source frames are never rewritten; only automatically created frames are audited and repaired from their neighbours.</span>
+        </label>
+        <script>
+          window.addEventListener("DOMContentLoaded", () => {
+            const control = document.getElementById("temporalRepairControl");
+            const checkbox = document.getElementById("temporalRepairAudit");
+            const form = document.getElementById("form");
+            const target = document.getElementById("targetGaps");
+            const grid = document.querySelector(".advanced-engine-grid");
+            if (!control || !checkbox || !form) return;
+
+            if (grid) grid.appendChild(control);
+            else form.appendChild(control);
+            control.hidden = false;
+
+            const token = "repair:propainter";
+            const hasToken = value => String(value || "").split(",").some(part => part.trim().toLowerCase() === token);
+            if (target && hasToken(target.value)) checkbox.checked = true;
+            target?.addEventListener("change", () => {
+              if (hasToken(target.value)) checkbox.checked = true;
+            });
+
+            // app_all deliberately whitelists render settings. Encode this optional
+            // repair flag in target_gaps at FormData construction time; the gap
+            // parser ignores non-gap tokens, while temporal_repair consumes it.
+            form.addEventListener("formdata", event => {
+              const data = event.formData;
+              const parts = String(data.get("target_gaps") || "")
+                .split(",")
+                .map(part => part.trim())
+                .filter(part => part && part.toLowerCase() !== token);
+              if (checkbox.checked) parts.push(token);
+              data.set("target_gaps", parts.join(","));
+            });
+          });
+        </script>
       </section>
