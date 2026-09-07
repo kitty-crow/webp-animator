@@ -58,9 +58,13 @@ def install(advanced_pipeline_module):
     engine_progress.install(advanced_pipeline_module)
 
     # app_all imports temporal_v2 before calling this installer, so this is a safe
-    # place to attach the optional post-generation ProPainter auditor without
-    # disturbing the established temporal pipeline.
+    # place to attach optional wrappers without disturbing the established pipeline.
+    import app as legacy
+    import job_control
     import temporal_repair
     import temporal_v2
 
     temporal_repair.install(temporal_v2)
+    # Install after temporal_repair so the outermost process_job wrapper owns the
+    # render lifetime and can cancel ProPainter as well as interpolation/generation.
+    job_control.install(legacy, advanced_pipeline_module, temporal_v2)
