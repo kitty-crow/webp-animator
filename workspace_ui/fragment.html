@@ -11,125 +11,23 @@
         <style>
           html[data-theme="light"] { color-scheme: light; }
           html[data-theme="dark"] { color-scheme: dark; }
-          body.pages-body {
-            display: block;
-            padding: 0;
-            min-width: 0;
-          }
-          .pages-skip {
-            position: fixed;
-            z-index: 100;
-            top: .5rem;
-            left: .5rem;
-            padding: .65rem .85rem;
-            border-radius: .7rem;
-            background: Highlight;
-            color: HighlightText;
-            font-weight: 850;
-            translate: 0 -160%;
-          }
+          body.pages-body { display: block; padding: 0; min-width: 0; }
+          .pages-skip { position: fixed; z-index: 100; top: .5rem; left: .5rem; padding: .65rem .85rem; border-radius: .7rem; background: Highlight; color: HighlightText; font-weight: 850; translate: 0 -160%; }
           .pages-skip:focus { translate: 0; }
-          .pages-header,
-          [data-pages-header] {
-            position: sticky;
-            top: 0;
-            z-index: 50;
-            border-bottom: 1px solid color-mix(in srgb, CanvasText 16%, transparent);
-            background: color-mix(in srgb, Canvas 90%, transparent);
-            backdrop-filter: blur(18px) saturate(1.2);
-          }
-          .pages-header__inner {
-            width: min(calc(100% - 2rem), 1040px);
-            min-height: 4rem;
-            margin: auto;
-            display: grid;
-            grid-template-columns: auto 1fr auto;
-            align-items: center;
-            gap: 1rem;
-            min-width: 0;
-          }
-          .pages-brand {
-            color: CanvasText;
-            text-decoration: none;
-            font-weight: 900;
-            letter-spacing: -.025em;
-            white-space: nowrap;
-          }
-          .pages-nav {
-            display: flex;
-            justify-content: center;
-            gap: .2rem;
-            min-width: 0;
-          }
-          .pages-nav a {
-            padding: .5rem .72rem;
-            border-radius: 999px;
-            color: color-mix(in srgb, CanvasText 72%, transparent);
-            text-decoration: none;
-            font-size: .86rem;
-            font-weight: 750;
-          }
-          .pages-nav a:hover,
-          .pages-nav a[aria-current="page"] {
-            background: color-mix(in srgb, Highlight 12%, transparent);
-            color: CanvasText;
-          }
-          .pages-theme {
-            display: inline-flex;
-            align-items: center;
-            gap: .45rem;
-            width: auto;
-            margin: 0;
-            padding: .42rem .58rem;
-            border: 1px solid color-mix(in srgb, CanvasText 20%, transparent);
-            border-radius: 999px;
-            background: Canvas;
-            color: CanvasText;
-            font: inherit;
-            font-size: .76rem;
-            font-weight: 800;
-          }
-          .pages-theme__track {
-            position: relative;
-            width: 2rem;
-            height: 1.08rem;
-            border-radius: 999px;
-            background: color-mix(in srgb, Highlight 16%, Canvas);
-          }
-          .pages-theme__thumb {
-            position: absolute;
-            top: .16rem;
-            left: .16rem;
-            width: .76rem;
-            height: .76rem;
-            border-radius: 50%;
-            background: Highlight;
-            transition: translate .2s ease;
-          }
+          .pages-header, [data-pages-header] { position: sticky; top: 0; z-index: 50; border-bottom: 1px solid color-mix(in srgb, CanvasText 16%, transparent); background: color-mix(in srgb, Canvas 90%, transparent); backdrop-filter: blur(18px) saturate(1.2); }
+          .pages-header__inner { width: min(calc(100% - 2rem), 1040px); min-height: 4rem; margin: auto; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 1rem; min-width: 0; }
+          .pages-brand { color: CanvasText; text-decoration: none; font-weight: 900; letter-spacing: -.025em; white-space: nowrap; }
+          .pages-nav { display: flex; justify-content: center; gap: .2rem; min-width: 0; }
+          .pages-nav a { padding: .5rem .72rem; border-radius: 999px; color: color-mix(in srgb, CanvasText 72%, transparent); text-decoration: none; font-size: .86rem; font-weight: 750; }
+          .pages-nav a:hover, .pages-nav a[aria-current="page"] { background: color-mix(in srgb, Highlight 12%, transparent); color: CanvasText; }
+          .pages-theme { display: inline-flex; align-items: center; gap: .45rem; width: auto; margin: 0; padding: .42rem .58rem; border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); border-radius: 999px; background: Canvas; color: CanvasText; font: inherit; font-size: .76rem; font-weight: 800; }
+          .pages-theme__track { position: relative; width: 2rem; height: 1.08rem; border-radius: 999px; background: color-mix(in srgb, Highlight 16%, Canvas); }
+          .pages-theme__thumb { position: absolute; top: .16rem; left: .16rem; width: .76rem; height: .76rem; border-radius: 50%; background: Highlight; transition: translate .2s ease; }
           .pages-theme[data-theme-state="dark"] .pages-theme__thumb { translate: .92rem 0; }
-          body.pages-body > main.pages-main {
-            width: min(calc(100% - 2rem), 1040px);
-            margin: 1.5rem auto 2rem;
-          }
-          .pages-footer {
-            width: min(calc(100% - 2rem), 1040px);
-            margin: auto;
-            padding: 1.5rem 0 2.5rem;
-            border-top: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
-            display: flex;
-            justify-content: space-between;
-            gap: 1rem;
-            color: color-mix(in srgb, CanvasText 70%, transparent);
-            font-size: .82rem;
-          }
+          body.pages-body > main.pages-main { width: min(calc(100% - 2rem), 1040px); margin: 1.5rem auto 2rem; }
+          .pages-footer { width: min(calc(100% - 2rem), 1040px); margin: auto; padding: 1.5rem 0 2.5rem; border-top: 1px solid color-mix(in srgb, CanvasText 18%, transparent); display: flex; justify-content: space-between; gap: 1rem; color: color-mix(in srgb, CanvasText 70%, transparent); font-size: .82rem; }
           .pages-footer a { color: LinkText; font-weight: 750; }
-          .workspace-panel {
-            margin: 14px 0 18px;
-            padding: 14px;
-            border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
-            border-radius: 14px;
-            background: color-mix(in srgb, CanvasText 2.5%, Canvas);
-          }
+          .workspace-panel { margin: 14px 0 18px; padding: 14px; border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); border-radius: 14px; background: color-mix(in srgb, CanvasText 2.5%, Canvas); }
           .workspace-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
           .workspace-head strong { margin-right: auto; }
           .workspace-id { margin-top: 8px; font: 600 .78rem ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; opacity: .78; }
@@ -143,10 +41,21 @@
           .workspace-result-actions a { display: inline-block; margin: 0; font-weight: 800; }
           .workspace-result-actions button { width: auto; margin: 0; padding: 8px 11px; border-radius: 9px; border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); background: Canvas; color: CanvasText; font-weight: 800; }
           .workspace-note { margin-top: 8px; font-size: .78rem; opacity: .68; line-height: 1.35; }
+          .pipeline-editor { grid-column: 1 / -1; border-top: 1px solid color-mix(in srgb, CanvasText 14%, transparent); padding-top: 12px; }
+          .pipeline-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
+          .pipeline-title strong { margin-right: auto; }
+          .pipeline-add, .pipeline-row button { width: auto !important; margin: 0 !important; padding: 7px 9px !important; border-radius: 8px !important; border: 1px solid color-mix(in srgb, CanvasText 18%, transparent) !important; background: Canvas !important; color: CanvasText !important; font-weight: 750 !important; }
+          .pipeline-list { display: grid; gap: 7px; }
+          .pipeline-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto auto; gap: 6px; align-items: center; min-width: 0; }
+          .pipeline-number { min-width: 4.4rem; font-size: .78rem; font-weight: 800; opacity: .72; }
+          .pipeline-row select { min-width: 0; width: 100%; }
+          .pipeline-hint { margin-top: 8px; font-size: .76rem; opacity: .68; line-height: 1.35; }
           @media (max-width: 620px) {
             .pages-header__inner { grid-template-columns: 1fr auto; gap: .5rem; }
             .pages-nav { display: none; }
             .pages-footer { flex-direction: column; }
+            .pipeline-row { grid-template-columns: auto minmax(0, 1fr) auto auto; }
+            .pipeline-row [data-pipeline-remove] { grid-column: 2 / -1; justify-self: end; }
           }
         </style>
         <div class="workspace-head">
@@ -170,13 +79,11 @@
           </div>
         </div>
 
-        <!-- Exists before workspace.js runs so IndexedDB can save/restore it. JS
-             moves the same control into the temporal options once advanced_ui has
-             built them. -->
         <label id="temporalRepairControl" class="wide" hidden>
-          <span><input id="temporalRepairAudit" type="checkbox"> Audit + repair every generated/interpolated frame</span>
-          <span class="hint">CUDA ProPainter temporal repair. Original source frames are never rewritten; only automatically created frames are audited and repaired from their neighbours.</span>
+          <span><input id="temporalRepairAudit" type="checkbox"> Enable ProPainter repair passes</span>
+          <span class="hint">CUDA ProPainter temporal repair. Original source frames are never rewritten; a Repair pass audits generated/interpolated frames that exist at that point in the pipeline.</span>
         </label>
+        <input id="temporalPipelineState" type="hidden" value="gap,repair,interpolate">
         <script>
           window.addEventListener("DOMContentLoaded", () => {
             const body = document.body;
@@ -193,32 +100,17 @@
                 skip.textContent = "Skip to content";
                 body.prepend(skip);
               }
-
               if (!document.querySelector("[data-pages-header]")) {
                 const header = document.createElement("header");
                 header.className = "pages-header";
                 header.dataset.pagesHeader = "";
-                header.innerHTML = `
-                  <div class="pages-header__inner">
-                    <a class="pages-brand" href="/">WebP Animator</a>
-                    <nav class="pages-nav" aria-label="Primary navigation">
-                      <a href="/" aria-current="page">Animator</a>
-                      <a href="https://github.com/kitty-crow/webp-animator">GitHub</a>
-                    </nav>
-                    <button class="pages-theme" type="button" data-theme-toggle aria-pressed="false" aria-label="Toggle light and dark theme">
-                      <span class="pages-theme__track" aria-hidden="true"><span class="pages-theme__thumb"></span></span>
-                      <span data-theme-label aria-hidden="true">☀️</span>
-                    </button>
-                  </div>`;
+                header.innerHTML = `<div class="pages-header__inner"><a class="pages-brand" href="/">WebP Animator</a><nav class="pages-nav" aria-label="Primary navigation"><a href="/" aria-current="page">Animator</a><a href="https://github.com/kitty-crow/webp-animator">GitHub</a></nav><button class="pages-theme" type="button" data-theme-toggle aria-pressed="false" aria-label="Toggle light and dark theme"><span class="pages-theme__track" aria-hidden="true"><span class="pages-theme__thumb"></span></span><span data-theme-label aria-hidden="true">☀️</span></button></div>`;
                 body.insertBefore(header, main);
               }
-
               if (!document.querySelector(".pages-footer")) {
                 const footer = document.createElement("footer");
                 footer.className = "pages-footer";
-                footer.innerHTML = `
-                  <span>WebP Animator</span>
-                  <span data-pages-footer-links><a href="https://github.com/kitty-crow/webp-animator">GitHub</a></span>`;
+                footer.innerHTML = `<span>WebP Animator</span><span data-pages-footer-links><a href="https://github.com/kitty-crow/webp-animator">GitHub</a></span>`;
                 main.insertAdjacentElement("afterend", footer);
               }
 
@@ -227,29 +119,18 @@
               const toggle = document.querySelector("[data-theme-toggle]");
               const label = document.querySelector("[data-theme-label]");
               const themeMeta = document.querySelector('meta[name="theme-color"]');
-              const readSavedTheme = () => {
-                try { return localStorage.getItem(themeKey); } catch { return null; }
-              };
+              const readSavedTheme = () => { try { return localStorage.getItem(themeKey); } catch { return null; } };
               const applyTheme = (theme, persist = false) => {
                 const next = theme === "dark" ? "dark" : "light";
                 document.documentElement.dataset.theme = next;
-                if (toggle) {
-                  toggle.dataset.themeState = next;
-                  toggle.setAttribute("aria-pressed", String(next === "dark"));
-                }
+                if (toggle) { toggle.dataset.themeState = next; toggle.setAttribute("aria-pressed", String(next === "dark")); }
                 if (label) label.textContent = next === "dark" ? "🌙" : "☀️";
                 if (themeMeta) themeMeta.content = next === "dark" ? "#11131a" : "#f5f6f8";
-                if (persist) {
-                  try { localStorage.setItem(themeKey, next); } catch {}
-                }
+                if (persist) { try { localStorage.setItem(themeKey, next); } catch {} }
               };
               applyTheme(document.documentElement.dataset.theme || (media?.matches ? "dark" : "light"));
-              toggle?.addEventListener("click", () => {
-                applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark", true);
-              });
-              media?.addEventListener?.("change", event => {
-                if (!readSavedTheme()) applyTheme(event.matches ? "dark" : "light");
-              });
+              toggle?.addEventListener("click", () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark", true));
+              media?.addEventListener?.("change", event => { if (!readSavedTheme()) applyTheme(event.matches ? "dark" : "light"); });
             }
 
             const control = document.getElementById("temporalRepairControl");
@@ -257,30 +138,103 @@
             const form = document.getElementById("form");
             const target = document.getElementById("targetGaps");
             const grid = document.querySelector(".advanced-engine-grid");
-            if (!control || !checkbox || !form) return;
+            const generator = document.getElementById("frameGenerator");
+            const interpolator = document.getElementById("interpolator");
+            const pipelineState = document.getElementById("temporalPipelineState");
+            if (!control || !checkbox || !form || !pipelineState) return;
 
             if (grid) grid.appendChild(control);
             else form.appendChild(control);
             control.hidden = false;
 
-            const token = "repair:propainter";
-            const hasToken = value => String(value || "").split(",").some(part => part.trim().toLowerCase() === token);
-            if (target && hasToken(target.value)) checkbox.checked = true;
+            const repairToken = "repair:propainter";
+            const pipelinePrefix = "pipeline:";
+            const partsOf = value => String(value || "").split(",").map(part => part.trim()).filter(Boolean);
+            const oldRepair = partsOf(target?.value).some(part => part.toLowerCase() === repairToken);
+            const savedPipelineToken = partsOf(target?.value).find(part => part.toLowerCase().startsWith(pipelinePrefix));
+            if (oldRepair) checkbox.checked = true;
+            if (savedPipelineToken) pipelineState.value = savedPipelineToken.slice(pipelinePrefix.length).replace(/[>|]/g, ",");
+
+            const editor = document.createElement("section");
+            editor.className = "pipeline-editor wide";
+            editor.innerHTML = `<div class="pipeline-title"><strong>Temporal operation order</strong><button type="button" class="pipeline-add" id="pipelineAdd">+ Add pass</button></div><div class="pipeline-list" id="pipelineList"></div><div class="pipeline-hint">Default: Gap filling → ProPainter repair → Interpolation. Each pass consumes the output of the previous pass. Repeating a pass intentionally subdivides the current timeline again. A pass whose engine is None is skipped.</div>`;
+            if (grid) grid.appendChild(editor);
+            else control.insertAdjacentElement("afterend", editor);
+
+            const list = editor.querySelector("#pipelineList");
+            const addButton = editor.querySelector("#pipelineAdd");
+            const choices = [["gap", "Gap filling"], ["repair", "ProPainter repair"], ["interpolate", "Interpolation"]];
+
+            function normalisePipeline(value) {
+              const valid = new Set(choices.map(item => item[0]));
+              const parsed = partsOf(value).map(part => part.toLowerCase()).filter(part => valid.has(part));
+              return parsed.length ? parsed : ["gap", "repair", "interpolate"];
+            }
+
+            function syncState() {
+              const rows = [...list.querySelectorAll(".pipeline-row")];
+              rows.forEach((row, index) => {
+                row.querySelector(".pipeline-number").textContent = `Pass ${index + 1}`;
+                row.querySelector("[data-pipeline-up]").disabled = index === 0;
+                row.querySelector("[data-pipeline-down]").disabled = index === rows.length - 1;
+              });
+              pipelineState.value = rows.map(row => row.querySelector("select").value).join(",");
+              pipelineState.dispatchEvent(new Event("change", { bubbles: true }));
+            }
+
+            function makeRow(value = "gap") {
+              const row = document.createElement("div");
+              row.className = "pipeline-row";
+              const options = choices.map(([id, text]) => `<option value="${id}"${id === value ? " selected" : ""}>${text}</option>`).join("");
+              row.innerHTML = `<span class="pipeline-number">Pass</span><select aria-label="Temporal pass type">${options}</select><button type="button" data-pipeline-up aria-label="Move pass up">↑</button><button type="button" data-pipeline-down aria-label="Move pass down">↓</button><button type="button" data-pipeline-remove aria-label="Remove pass">Remove</button>`;
+              const select = row.querySelector("select");
+              select.addEventListener("change", () => { if (select.value === "repair") checkbox.checked = true; syncState(); });
+              row.querySelector("[data-pipeline-up]").addEventListener("click", () => { const previous = row.previousElementSibling; if (previous) list.insertBefore(row, previous); syncState(); });
+              row.querySelector("[data-pipeline-down]").addEventListener("click", () => { const next = row.nextElementSibling; if (next) list.insertBefore(next, row); syncState(); });
+              row.querySelector("[data-pipeline-remove]").addEventListener("click", () => { row.remove(); syncState(); });
+              return row;
+            }
+
+            function rebuild(value) {
+              list.replaceChildren();
+              normalisePipeline(value).forEach(operation => list.appendChild(makeRow(operation)));
+              syncState();
+            }
+
+            addButton.addEventListener("click", () => { list.appendChild(makeRow("gap")); syncState(); });
+            pipelineState.addEventListener("change", event => {
+              if (event.target !== pipelineState || pipelineState.dataset.syncing === "1") return;
+              const current = [...list.querySelectorAll("select")].map(select => select.value).join(",");
+              if (current === pipelineState.value) return;
+              pipelineState.dataset.syncing = "1";
+              rebuild(pipelineState.value);
+              delete pipelineState.dataset.syncing;
+            });
+            rebuild(pipelineState.value);
+
             target?.addEventListener("change", () => {
-              if (hasToken(target.value)) checkbox.checked = true;
+              const values = partsOf(target.value);
+              if (values.some(part => part.toLowerCase() === repairToken)) checkbox.checked = true;
+              const token = values.find(part => part.toLowerCase().startsWith(pipelinePrefix));
+              if (token) rebuild(token.slice(pipelinePrefix.length).replace(/[>|]/g, ","));
             });
 
-            // app_all deliberately whitelists render settings. Encode this optional
-            // repair flag in target_gaps at FormData construction time; the gap
-            // parser ignores non-gap tokens, while temporal_repair consumes it.
             form.addEventListener("formdata", event => {
               const data = event.formData;
-              const parts = String(data.get("target_gaps") || "")
-                .split(",")
-                .map(part => part.trim())
-                .filter(part => part && part.toLowerCase() !== token);
-              if (checkbox.checked) parts.push(token);
-              data.set("target_gaps", parts.join(","));
+              const baseParts = partsOf(data.get("target_gaps")).filter(part => {
+                const lower = part.toLowerCase();
+                return lower !== repairToken && !lower.startsWith(pipelinePrefix);
+              });
+              const active = [...list.querySelectorAll("select")]
+                .map(select => select.value)
+                .filter(operation => {
+                  if (operation === "repair") return checkbox.checked;
+                  if (operation === "gap") return generator?.value && generator.value !== "none";
+                  if (operation === "interpolate") return interpolator?.value && interpolator.value !== "none";
+                  return false;
+                });
+              if (active.length) baseParts.push(`${pipelinePrefix}${active.join(">")}`);
+              data.set("target_gaps", baseParts.join(","));
             });
           });
         </script>
