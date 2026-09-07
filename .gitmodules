@@ -1,0 +1,3 @@
+[submodule "vendor/pages"]
+	path = vendor/pages
+	url = https://github.com/kitty-crow/github-pages-template.git
