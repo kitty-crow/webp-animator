@@ -56,3 +56,11 @@ def install(advanced_pipeline_module):
 
     advanced_pipeline_module._insert_interpolator_results = insert_interpolator_results
     engine_progress.install(advanced_pipeline_module)
+
+    # app_all imports temporal_v2 before calling this installer, so this is a safe
+    # place to attach the optional post-generation ProPainter auditor without
+    # disturbing the established temporal pipeline.
+    import temporal_repair
+    import temporal_v2
+
+    temporal_repair.install(temporal_v2)
