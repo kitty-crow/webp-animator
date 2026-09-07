@@ -53,7 +53,7 @@
       background-size:14px 14px;
       background-position:0 0, 0 7px, 7px -7px, -7px 0;
     }
-    .live-frame-stage { margin-top:7px; font-size:.72rem; font-weight:800; text-transform:capitalize; overflow-wrap:anywhere; }
+    .live-frame-stage { margin-top:7px; font-size:.72rem; font-weight:800; overflow-wrap:anywhere; }
     .live-frame-name { margin-top:2px; font:600 .68rem ui-monospace, SFMono-Regular, Menlo, monospace; opacity:.64; overflow-wrap:anywhere; }
     .live-frame-card a { display:inline-block; margin-top:6px; font-size:.72rem; font-weight:750; }
     @media(max-width:620px) { .live-frame-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
@@ -65,12 +65,12 @@
   panel.className = "live-run-panel";
   panel.innerHTML = `
     <div class="live-run-head">
-      <strong>Live generated frames</strong>
+      <strong>Live animation timeline</strong>
       <button id="liveStopButton" class="live-stop-button" type="button" disabled>Stop</button>
     </div>
-    <div id="liveRunNote" class="live-run-note">Generated/interpolated frames will appear here while the engine is working.</div>
+    <div id="liveRunNote" class="live-run-note">Original frames and newly created frames will appear here in timeline order while the run is working.</div>
     <div id="liveFrameGrid" class="live-frame-grid">
-      <div class="live-frame-empty">No generated frames yet.</div>
+      <div class="live-frame-empty">No timeline frames available yet.</div>
     </div>
   `;
   progressWrap.insertAdjacentElement("afterend", panel);
@@ -91,13 +91,17 @@
     catch { return ""; }
   }
 
-  function clearCards() {
-    cards.clear();
+  function showEmpty() {
     grid.replaceChildren();
     const empty = document.createElement("div");
     empty.className = "live-frame-empty";
-    empty.textContent = "No generated frames yet.";
+    empty.textContent = "No timeline frames available yet.";
     grid.appendChild(empty);
+  }
+
+  function clearCards() {
+    cards.clear();
+    showEmpty();
   }
 
   function setJob(jobId, renderCount = null) {
@@ -114,7 +118,7 @@
     card.className = "live-frame-card";
 
     const image = document.createElement("img");
-    image.alt = `${item.stage || "Generated"} ${item.name || "frame"}`;
+    image.alt = `${item.stage || "Frame"} ${item.name || "frame"}`;
     image.loading = "lazy";
     image.decoding = "async";
 
@@ -126,35 +130,46 @@
 
     const download = document.createElement("a");
     download.textContent = "Download frame";
-    download.download = item.name || "generated-frame.png";
+    download.download = item.name || "frame.png";
 
     card.append(image, stage, name, download);
-    grid.appendChild(card);
     return { card, image, stage, name, download, version: null };
   }
 
   function renderFrames(items) {
     if (!Array.isArray(items)) return;
-    if (items.length && grid.querySelector(".live-frame-empty")) grid.replaceChildren();
+    if (!items.length) {
+      cards.clear();
+      showEmpty();
+      return;
+    }
+
+    const nextCards = new Map();
+    const orderedNodes = [];
 
     for (const item of items) {
       const key = String(item.key || "");
       if (!key) continue;
       let entry = cards.get(key);
-      if (!entry) {
-        entry = makeCard(item);
-        cards.set(key, entry);
-      }
+      if (!entry) entry = makeCard(item);
+
       const version = String(item.mtime_ns || "0");
       if (entry.version !== version) {
         entry.version = version;
         entry.image.src = item.url;
         entry.download.href = item.url;
       }
-      entry.stage.textContent = String(item.stage || "Generated frame");
+      entry.image.alt = `${item.stage || "Frame"} ${item.name || "frame"}`;
+      entry.stage.textContent = String(item.stage || "Frame");
       entry.name.textContent = String(item.name || key);
-      entry.download.download = String(item.name || "generated-frame.png");
+      entry.download.download = String(item.name || "frame.png");
+
+      nextCards.set(key, entry);
+      orderedNodes.push(entry.card);
     }
+
+    cards = nextCards;
+    grid.replaceChildren(...orderedNodes);
   }
 
   async function fetchLive(jobId) {
@@ -177,7 +192,7 @@
       const candidate = active || watchedJobId;
       if (!candidate) {
         stopButton.disabled = true;
-        note.textContent = "Generated/interpolated frames will appear here while the engine is working.";
+        note.textContent = "Original frames and newly created frames will appear here in timeline order while the run is working.";
         return;
       }
 
@@ -202,13 +217,13 @@
         stopButton.textContent = stoppedLocally ? "Stopping…" : "Stop";
         const count = cards.size;
         if (state === "cancelled") {
-          note.textContent = `Stopped. ${count} generated frame${count === 1 ? "" : "s"} kept below for inspection.`;
+          note.textContent = `Stopped. Current timeline has ${count} frame${count === 1 ? "" : "s"} available for inspection.`;
         } else if (running) {
-          note.textContent = `${count} generated frame${count === 1 ? "" : "s"} available so far · ${progress.message || "processing"}`;
+          note.textContent = `Current timeline: ${count} frame${count === 1 ? "" : "s"} · ${progress.message || "processing"}`;
         } else if (state === "done") {
-          note.textContent = `${count} generated frame${count === 1 ? "" : "s"} captured during this completed run.`;
+          note.textContent = `Completed timeline: ${count} frame${count === 1 ? "" : "s"}.`;
         } else if (state === "error") {
-          note.textContent = `${count} generated frame${count === 1 ? "" : "s"} were produced before the run failed.`;
+          note.textContent = `Run failed. Last available timeline has ${count} frame${count === 1 ? "" : "s"}.`;
         }
       }
     } catch {
@@ -224,7 +239,7 @@
     stoppedLocally = true;
     stopButton.disabled = true;
     stopButton.textContent = "Stopping…";
-    note.textContent = "Stopping the active engine and keeping frames already produced…";
+    note.textContent = "Stopping the active engine and keeping the current timeline for inspection…";
     try {
       const response = await fetch(`/job/stop?id=${encodeURIComponent(jobId)}`, {
         method: "POST",
@@ -232,8 +247,6 @@
       });
       if (!response.ok) throw new Error((await response.text()) || `Stop failed (${response.status})`);
 
-      // Stop the existing browser monitor as well. These bindings are defined by
-      // the main page script before this deferred script executes.
       try { monitorGeneration += 1; } catch {}
       try { clearActiveJob(jobId); } catch {
         try { localStorage.removeItem(ACTIVE_JOB_KEY); } catch {}
@@ -243,10 +256,10 @@
         button.textContent = "Generate WebP";
       } catch {}
       try {
-        status.textContent = "Stopped by user. Generated frames produced so far are kept below for inspection.";
+        status.textContent = "Stopped by user. The current live timeline is kept below for inspection.";
         progressLabel.textContent = "Stopped";
       } catch {}
-      note.textContent = `Stopped. ${cards.size} generated frame${cards.size === 1 ? "" : "s"} kept below for inspection.`;
+      note.textContent = `Stopped. Current timeline has ${cards.size} frame${cards.size === 1 ? "" : "s"} available for inspection.`;
       stopButton.textContent = "Stop";
     } catch (error) {
       stoppedLocally = false;
