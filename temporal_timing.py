@@ -57,14 +57,15 @@ def install(advanced_pipeline_module):
     advanced_pipeline_module._insert_interpolator_results = insert_interpolator_results
     engine_progress.install(advanced_pipeline_module)
 
-    # app_all imports temporal_v2 before calling this installer, so this is a safe
-    # place to attach optional wrappers without disturbing the established pipeline.
     import app as legacy
     import job_control
+    import operation_pipeline
     import temporal_repair
     import temporal_v2
 
+    # The ordered pipeline owns the actual temporal pass sequence. ProPainter then
+    # wraps only legacy jobs that do not provide an explicit pipeline; job_control
+    # remains outermost so Stop can terminate whichever engine is currently active.
+    operation_pipeline.install(temporal_v2)
     temporal_repair.install(temporal_v2)
-    # Install after temporal_repair so the outermost process_job wrapper owns the
-    # render lifetime and can cancel ProPainter as well as interpolation/generation.
     job_control.install(legacy, advanced_pipeline_module, temporal_v2)
