@@ -348,6 +348,29 @@
     return blob;
   }
 
+  async function extractFinishedWebP(blob, sourceJobId) {
+    const webpFile = new File(
+      [blob],
+      `continued-${sourceJobId.slice(0, 8) || "animation"}.webp`,
+      { type: "image/webp", lastModified: Date.now() },
+    );
+    const data = new FormData();
+    data.append("webp", webpFile, webpFile.name);
+    const response = await fetch("/extract-webp", {
+      method: "POST",
+      cache: "no-store",
+      body: data,
+    });
+    if (!response.ok) {
+      throw new Error((await response.text()) || `Finished WebP extraction failed (${response.status}).`);
+    }
+    const extracted = await response.json();
+    if (!Array.isArray(extracted?.frames)) {
+      throw new Error("Server returned invalid finished-frame data.");
+    }
+    return extracted;
+  }
+
   async function continueAsNewJob() {
     if (!continueButton) return;
     const sourceJobId = globalJobId;
@@ -357,12 +380,7 @@
     try {
       jobStatus.textContent = "Decoding the finished WebP into editable frames…";
       const blob = await getFinishedWebPBlob();
-      const webpFile = new File(
-        [blob],
-        `continued-${sourceJobId.slice(0, 8) || "animation"}.webp`,
-        { type: "image/webp", lastModified: Date.now() },
-      );
-      const extracted = await extractWebP(webpFile);
+      const extracted = await extractFinishedWebP(blob, sourceJobId);
       const decoded = (extracted.frames || []).map(extractedFrame => {
         const file = base64ToFile(
           extractedFrame.data,
@@ -390,6 +408,7 @@
       }
 
       renderFrames();
+      document.getElementById("uploadProgress")?.classList.remove("visible");
       await snapshot(null);
       jobStatus.textContent = `Created new job ${globalJobId} from ${decoded.length} finished frame${decoded.length === 1 ? "" : "s"}. Original job ${sourceJobId} is unchanged.`;
       status.textContent = `Continuation ready: ${decoded.length} frame${decoded.length === 1 ? "" : "s"} loaded from the finished WebP.`;
