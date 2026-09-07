@@ -6,6 +6,8 @@ import threading
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
+import engine_progress
+
 ROOT = Path(__file__).resolve().parent
 LIVE_UI = ROOT / "live_run_ui.js"
 
@@ -119,8 +121,31 @@ def cancel(job_id: str) -> int:
     return len(processes)
 
 
+def _report_engine_progress(label: str, current: int, total: int, callback) -> None:
+    if callback is None:
+        return
+    engine = str(label).upper()
+    noun = engine_progress._ENGINE_NOUN.get(engine)
+    if not noun:
+        callback(current, total)
+        return
+    engine_progress._state.engine = engine
+    engine_progress._state.current = max(0, int(current))
+    engine_progress._state.total = max(1, int(total))
+    try:
+        callback(current, total)
+    finally:
+        engine_progress._state.engine = None
+        engine_progress._state.current = None
+        engine_progress._state.total = None
+
+
 def run_process(command, *, cwd: Path, progress_callback=None, label: str):
-    """Drop-in replacement for advanced_pipeline._run_process with cancellation."""
+    """Drop-in engine runner with hard child-process cancellation.
+
+    engine_progress installed before us, so reproduce its thread-local counter
+    context while owning Popen directly. This keeps frame/step X/Y status intact.
+    """
     raise_if_cancelled()
     process = subprocess.Popen(
         [str(item) for item in command],
@@ -141,8 +166,7 @@ def run_process(command, *, cwd: Path, progress_callback=None, label: str):
             if line.startswith("PROGRESS "):
                 try:
                     _, current, total = line.split()
-                    if progress_callback:
-                        progress_callback(int(current), max(1, int(total)))
+                    _report_engine_progress(label, int(current), max(1, int(total)), progress_callback)
                 except JobCancelled:
                     raise
                 except Exception:
@@ -179,10 +203,10 @@ def _live_root(job_id: str) -> tuple[Path | None, dict | None]:
     job = _legacy.get_job(job_id)
     if not isinstance(job, dict):
         return None, None
-    job_dir = Path(str(job.get("job_dir", "")))
-    if not job_dir:
+    job_dir_text = str(job.get("job_dir", "")).strip()
+    if not job_dir_text:
         return None, job
-    return job_dir / "advanced", job
+    return Path(job_dir_text) / "advanced", job
 
 
 def _live_frames(job_id: str) -> tuple[list[dict], dict | None]:
@@ -275,6 +299,39 @@ def install(legacy, advanced_pipeline_module, temporal_v2_module) -> None:
 
     # All RIFE/AMT/EDEN/SPEED launches in temporal_v2 pass through this helper.
     advanced_pipeline_module._run_process = run_process
+
+    # Make cancellation cooperative around in-process stages too. We cannot safely
+    # tear down an arbitrary Python/CUDA call mid-instruction, but a stop prevents
+    # the next stage from starting and prevents a cancelled render from being encoded.
+    original_geometry = advanced_pipeline_module._normalise_geometry
+
+    def controlled_geometry(*args, **kwargs):
+        raise_if_cancelled()
+        value = original_geometry(*args, **kwargs)
+        raise_if_cancelled()
+        return value
+
+    advanced_pipeline_module._normalise_geometry = controlled_geometry
+
+    original_reduce = temporal_v2_module._smart_reduce
+
+    def controlled_reduce(*args, **kwargs):
+        raise_if_cancelled()
+        value = original_reduce(*args, **kwargs)
+        raise_if_cancelled()
+        return value
+
+    temporal_v2_module._smart_reduce = controlled_reduce
+
+    original_save_webp = temporal_v2_module.save_webp_fast
+
+    def controlled_save_webp(*args, **kwargs):
+        raise_if_cancelled()
+        value = original_save_webp(*args, **kwargs)
+        raise_if_cancelled()
+        return value
+
+    temporal_v2_module.save_webp_fast = controlled_save_webp
 
     original_process_job = temporal_v2_module.process_job
 
