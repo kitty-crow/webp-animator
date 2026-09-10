@@ -62,6 +62,7 @@ def _base_manifest(records, input_paths, stage_root: Path, stage_dir: Path, *, o
                 "generated": bool(getattr(record, "generated", False)),
                 "engine": str(getattr(record, "engine", "") or ""),
                 "timeline_index": index,
+                "duration": float(getattr(record, "duration", 100.0)),
             }
         )
 
@@ -107,6 +108,7 @@ def _publish(records, stage_root: Path, completed_pass: int) -> None:
                 "generated": bool(getattr(record, "generated", False)),
                 "engine": str(getattr(record, "engine", "") or ""),
                 "timeline_index": index,
+                "duration": float(getattr(record, "duration", 100.0)),
             }
         )
     _atomic_json(
