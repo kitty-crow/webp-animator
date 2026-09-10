@@ -19,10 +19,13 @@ def _ensure_keys(records) -> None:
 
 
 def _stage_for(record) -> str:
-    if not getattr(record, "generated", False):
+    if not getattr(record, "generated", False) and not getattr(record, "engine", None):
         return "Original"
     engine = str(getattr(record, "engine", "") or "generated")
     lower = engine.lower()
+    if "openai-repair" in lower:
+        prior = engine.replace("+openai-repair", "").replace("openai-repair+", "").strip("+")
+        return f"Repaired · {prior.upper() if prior else 'source'} + OpenAI"
     if "propainter" in lower:
         prior = engine.replace("+propainter", "").replace("propainter+", "").strip("+")
         return f"Repaired · {prior.upper() if prior else 'ProPainter'} + ProPainter"
@@ -30,6 +33,8 @@ def _stage_for(record) -> str:
         return f"Interpolated · {engine.upper()}"
     if any(name in lower for name in ("eden", "speed")):
         return f"Generated · {engine.upper()}"
+    if not getattr(record, "generated", False):
+        return f"Repaired · {engine}"
     return f"Generated · {engine}"
 
 
@@ -162,10 +167,11 @@ def install(operation_pipeline_module) -> None:
         _publish(records, stage_root, pass_number)
         return result
 
-    def repair_pass(records, stage_dir, *, pass_number, pass_total, progress):
+    def repair_pass(records, stage_dir, *, settings, source_count, pass_number, pass_total, progress):
         stage_root = Path(stage_dir).parent
         _ensure_keys(records)
         input_paths = base._save_records(records, Path(stage_dir) / "input")
+        engine = operation_pipeline_module.repair_engine(settings)
         _base_manifest(
             records,
             input_paths,
@@ -174,11 +180,13 @@ def install(operation_pipeline_module) -> None:
             operation="repair",
             pass_number=pass_number,
             pair_specs=[],
-            engine="propainter",
+            engine=engine,
         )
         result = original_repair_pass(
             records,
             stage_dir,
+            settings=settings,
+            source_count=source_count,
             pass_number=pass_number,
             pass_total=pass_total,
             progress=progress,
