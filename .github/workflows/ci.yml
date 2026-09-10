@@ -10,6 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: false
 
       - uses: actions/setup-python@v5
         with:
@@ -18,24 +20,31 @@ jobs:
       - name: Install Python dependencies
         run: python -m pip install -r requirements.txt
 
-      - name: Check Python syntax, browser script and persistent app import
+      - name: Check Python syntax, browser scripts and persistent app import
         run: |
           python -m py_compile \
             app.py app_all.py global_jobs.py anim_align_webp.py frame1_optimizer.py \
             rife_worker.py rife_selective_worker.py amt_worker.py eden_worker.py speed_worker.py \
             advanced_pipeline.py temporal_v2.py engine_paths.py gpu_match.py smart_frames.py \
             webp_fast.py worker_common.py temporal_timing.py engine_progress.py \
-            setup_rife.py setup_engine_common.py setup_acceleration.py setup_amt.py setup_eden.py setup_speed.py
+            job_control.py live_timeline.py operation_pipeline.py pipeline_live.py pipeline_settings.py \
+            temporal_repair.py propainter_repair_worker.py timeline_pipeline.py \
+            openai_repair.py openai_repair_http.py \
+            setup_rife.py setup_engine_common.py setup_acceleration.py setup_amt.py setup_eden.py setup_speed.py setup_propainter.py
           node --check advanced_ui.js
+          node --check live_run_ui.js
+          node --check openai_repair_ui.js
+          node --check workspace_ui/workspace.js
           python - <<'PY'
           import app_all
           assert b"Recoverable job" in app_all.INDEX_HTML
           assert b"Final WebP preview" in app_all.INDEX_HTML
           assert b"workspace-ui.js" in app_all.INDEX_HTML
           assert b"advanced-ui.js" in app_all.INDEX_HTML
+          assert b"openai-repair-ui.js" in app_all.INDEX_HTML
           PY
 
-      - name: Test durable jobs, geometry, smart frames and WebP encoding
+      - name: Test durable jobs, geometry, temporal pipeline, repair and WebP encoding
         run: >-
           python -m unittest -v
           test_global_jobs.py
@@ -44,16 +53,28 @@ jobs:
           test_smart_frames.py
           test_advanced_features.py
           test_temporal_v2.py
+          test_operation_pipeline.py
+          test_live_timeline.py
+          test_openai_repair.py
 
-      - name: Ensure retired semantic interpolator is gone
+      - name: Ensure the retired semantic interpolator stays retired
         shell: bash
         run: |
           set -euo pipefail
-          if git ls-files | grep -i 'open''ai'; then
-            echo 'Retired semantic-interpolator files are still tracked.' >&2
-            exit 1
-          fi
-          if git grep -n -i 'open''ai' -- .; then
-            echo 'Retired semantic-interpolator references are still present.' >&2
-            exit 1
-          fi
+          forbidden=(
+            app_openai.py
+            openai_interrogator.py
+            openai_batch.py
+            openai_job_features.py
+            resilient_bridge.py
+            openai_bridge
+            openai_ui
+            vendor/openai-schema
+          )
+          for path in "${forbidden[@]}"; do
+            if git ls-files --error-unmatch "$path" >/dev/null 2>&1 || git ls-files "$path/*" | grep -q .; then
+              echo "Retired semantic-interpolator path is tracked: $path" >&2
+              exit 1
+            fi
+          done
+          echo "Retired semantic interpolator remains absent; OpenAI frame repair is allowed."
