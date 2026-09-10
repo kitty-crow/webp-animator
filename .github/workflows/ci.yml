@@ -28,7 +28,7 @@ jobs:
             advanced_pipeline.py temporal_v2.py engine_paths.py gpu_match.py smart_frames.py \
             webp_fast.py worker_common.py temporal_timing.py engine_progress.py looped_animation.py geometry_cache.py \
             job_control.py live_timeline.py operation_pipeline.py pipeline_live.py pipeline_settings.py \
-            temporal_repair.py propainter_repair_worker.py timeline_pipeline.py \
+            temporal_repair.py propainter_repair_worker.py timeline_pipeline.py repair_mode.py analysis_upload_reuse.py \
             openai_repair.py openai_repair_context.py openai_repair_http.py \
             setup_rife.py setup_engine_common.py setup_acceleration.py setup_amt.py setup_eden.py setup_speed.py setup_propainter.py
           node --check advanced_ui.js
@@ -43,6 +43,8 @@ jobs:
           assert b"advanced-ui.js" in app_all.INDEX_HTML
           assert b"openai-repair-ui.js" in app_all.INDEX_HTML
           assert b"Looped animation" in app_all.WORKSPACE_SCRIPT
+          assert b"OpenAI repair mode" in app_all.WORKSPACE_SCRIPT
+          assert b"analysis-upload-reuse-ui-v2" in app_all.ADVANCED_SCRIPT
           PY
 
       - name: Test durable jobs, geometry, temporal pipeline, repair and WebP encoding
@@ -59,6 +61,9 @@ jobs:
           test_openai_repair.py
           test_looped_animation.py
           test_geometry_cache.py
+          test_repair_mode.py
+          test_analysis_upload_reuse.py
+          test_manual_repair_persistence.py
 
       - name: Ensure the retired semantic interpolator stays retired
         shell: bash
