@@ -61,12 +61,18 @@ def install(advanced_pipeline_module):
     import job_control
     import live_timeline
     import looped_animation
+    import openai_repair_context
     import openai_repair_http
     import operation_pipeline
     import pipeline_settings
     import temporal_repair
     import temporal_v2
     import timeline_pipeline
+
+    # Use the context-aware implementation everywhere while keeping the retired
+    # semantic interpolator absent. OpenAI repairs deterministic candidates only.
+    operation_pipeline.openai_repair = openai_repair_context
+    openai_repair_http.openai_repair = openai_repair_context
 
     # The ordered pipeline owns the temporal pass sequence. timeline_pipeline wraps
     # each pass so a canonical current-animation timeline is published, while
