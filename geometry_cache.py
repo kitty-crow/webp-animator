@@ -7,13 +7,14 @@ import shutil
 import threading
 import uuid
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 from PIL import Image
 
 
 CACHE_VERSION = "geometry-cache-v1"
 _LOCK = threading.RLock()
+_TLS = threading.local()
 _GEOMETRY_KEYS = (
     "geometry_mode",
     "axis",
@@ -32,7 +33,14 @@ def cache_key(paths: Sequence[Path], settings: dict | None) -> str:
     digest = hashlib.sha256()
     digest.update(CACHE_VERSION.encode("utf-8"))
     digest.update(b"\0")
-    digest.update(json.dumps(geometry_settings(settings), sort_keys=True, separators=(",", ":"), default=str).encode("utf-8"))
+    digest.update(
+        json.dumps(
+            geometry_settings(settings),
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    )
     digest.update(b"\0")
     for ordinal, path in enumerate(paths):
         digest.update(str(ordinal).encode("ascii"))
@@ -45,6 +53,23 @@ def cache_key(paths: Sequence[Path], settings: dict | None) -> str:
                 digest.update(chunk)
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def cache_root_for_paths(paths: Sequence[Path]) -> Path | None:
+    """Return the durable job-local cache root for source or analysis snapshots."""
+    if not paths:
+        return None
+    try:
+        resolved = Path(paths[0]).resolve()
+    except Exception:
+        return None
+    for parent in (resolved.parent, *resolved.parents):
+        try:
+            if parent.parent.name == ".webp-jobs":
+                return parent / "geometry-cache"
+        except Exception:
+            continue
+    return None
 
 
 def _entry(cache_root: Path, key: str) -> Path:
@@ -111,6 +136,7 @@ def save(cache_root: Path, key: str, frames: Sequence[Image.Image], settings: di
 
 
 def normalise_with_cache(
+    normalise_fn: Callable,
     legacy,
     images: list[Image.Image],
     source_paths: Sequence[Path],
@@ -120,16 +146,9 @@ def normalise_with_cache(
     *,
     cache_label: str = "gap analysis",
 ) -> tuple[list[Image.Image], dict]:
-    """Normalise geometry once and optionally persist/reuse its exact output.
-
-    Cache identity includes source bytes in order plus every setting consumed by
-    `_normalise_geometry`. A changed frame, ordering, or geometry option therefore
-    cannot accidentally reuse an old alignment.
-    """
-    import advanced_pipeline as base
-
+    """Normalise geometry once and optionally persist/reuse its exact output."""
     if cache_root is None:
-        return base._normalise_geometry(legacy, images, settings, progress), {"hit": False, "key": None}
+        return normalise_fn(legacy, images, settings, progress), {"hit": False, "key": None}
 
     key = cache_key(source_paths, settings)
     cached = load(cache_root, key)
@@ -138,6 +157,77 @@ def normalise_with_cache(
             progress(40, f"Reusing frame matching from {cache_label}")
         return cached, {"hit": True, "key": key}
 
-    frames = base._normalise_geometry(legacy, images, settings, progress)
+    frames = normalise_fn(legacy, images, settings, progress)
     save(cache_root, key, frames, settings)
     return frames, {"hit": False, "key": key}
+
+
+def _push_context(paths: Sequence[Path], label: str):
+    previous = (
+        getattr(_TLS, "paths", None),
+        getattr(_TLS, "cache_root", None),
+        getattr(_TLS, "label", None),
+    )
+    _TLS.paths = [Path(path) for path in paths]
+    _TLS.cache_root = cache_root_for_paths(paths)
+    _TLS.label = label
+    return previous
+
+
+def _pop_context(previous) -> None:
+    for name, value in zip(("paths", "cache_root", "label"), previous):
+        if value is None:
+            try:
+                delattr(_TLS, name)
+            except AttributeError:
+                pass
+        else:
+            setattr(_TLS, name, value)
+
+
+def install(advanced_pipeline_module, temporal_v2_module) -> None:
+    """Persist analysis geometry and transparently reuse it during generation."""
+    if getattr(advanced_pipeline_module, "_geometry_cache_installed", False):
+        return
+    advanced_pipeline_module._geometry_cache_installed = True
+
+    original_normalise = advanced_pipeline_module._normalise_geometry
+    original_analyse = temporal_v2_module.analyse_paths
+    original_process = temporal_v2_module.process_job
+
+    def cached_normalise(legacy, images, settings, progress=None):
+        paths = getattr(_TLS, "paths", None)
+        cache_root = getattr(_TLS, "cache_root", None)
+        label = getattr(_TLS, "label", "gap analysis")
+        if not paths or len(paths) != len(images):
+            return original_normalise(legacy, images, settings, progress)
+        frames, state = normalise_with_cache(
+            original_normalise,
+            legacy,
+            images,
+            paths,
+            settings,
+            cache_root,
+            progress,
+            cache_label=label,
+        )
+        _TLS.last_cache_state = state
+        return frames
+
+    def analyse_paths(legacy, paths, settings, *args, **kwargs):
+        previous = _push_context(paths, "gap analysis")
+        try:
+            return original_analyse(legacy, paths, settings, *args, **kwargs)
+        finally:
+            _pop_context(previous)
+
+    def process_job(legacy, job_id, paths, settings):
+        previous = _push_context(paths, "gap analysis")
+        try:
+            return original_process(legacy, job_id, paths, settings)
+        finally:
+            _pop_context(previous)
+
+    advanced_pipeline_module._normalise_geometry = cached_normalise
+    temporal_v2_module.analyse_paths = analyse_paths
+    temporal_v2_module.process_job = process_job
