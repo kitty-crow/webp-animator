@@ -8,15 +8,29 @@ AUTO_TOKEN = "repair-mode:auto"
 
 
 UI_PATCH = r'''
-/* openai-repair-mode-ui-v1 */
+/* openai-repair-mode-ui-v2 */
 (() => {
   "use strict";
 
   const MANUAL = "repair-mode:manual";
   const AUTO = "repair-mode:auto";
+  let selectedSource = "editor";
+  let selectedTimelineIndex = -1;
 
   function parts(value) {
     return String(value || "").split(",").map(part => part.trim()).filter(Boolean);
+  }
+
+  function currentJobId() {
+    try {
+      return String(
+        window.webpAnimatorWorkspace?.currentId?.()
+        || localStorage.getItem("webp-animator-active-job")
+        || ""
+      ).trim().toLowerCase();
+    } catch {
+      return String(window.webpAnimatorWorkspace?.currentId?.() || "").trim().toLowerCase();
+    }
   }
 
   function install(attempt = 0) {
@@ -39,15 +53,14 @@ UI_PATCH = r'''
     control.insertBefore(wrap, document.getElementById("openaiRepairStatus") || null);
 
     const saved = parts(target.value).map(value => value.toLowerCase());
-    if (saved.includes(MANUAL)) mode.value = "manual";
-    else mode.value = "auto";
+    mode.value = saved.includes(MANUAL) ? "manual" : "auto";
 
     function refresh() {
       const active = engine.value === "openai";
       wrap.hidden = !active;
       hint.textContent = mode.value === "manual"
-        ? "OpenAI will not run automatically in Repair passes. Open a generated frame, paint the defect, then press Repair marked frame with OpenAI."
-        : "OpenAI starts automatically in Repair passes. Broad repaints are rejected; the deterministic candidate remains authoritative if a repair is unsafe.";
+        ? "OpenAI does not run automatically. Finish the deterministic run, open a generated frame, paint the defect, then repair that marked area. The finished WebP is rebuilt after each accepted manual repair."
+        : "OpenAI repairs generated frames automatically. Broad redraws are rejected and the deterministic candidate is kept instead.";
     }
 
     engine.addEventListener("change", refresh);
@@ -65,6 +78,45 @@ UI_PATCH = r'''
       if (engine.value === "openai") values.push(mode.value === "manual" ? MANUAL : AUTO);
       data.set("target_gaps", values.join(","));
     });
+
+    // Remember which modal source was opened. This allows the generic repair HTTP
+    // request to persist repairs made against the durable live timeline without
+    // coupling the modal module to the job store implementation.
+    document.addEventListener("click", event => {
+      const liveImage = event.target.closest?.("#liveFrameGrid .live-frame-card img");
+      if (liveImage) {
+        const cards = [...document.querySelectorAll("#liveFrameGrid .live-frame-card")];
+        selectedSource = "live";
+        selectedTimelineIndex = cards.indexOf(liveImage.closest(".live-frame-card"));
+        return;
+      }
+      if (event.target.closest?.("#frameStrip .frame-card .thumb")) {
+        selectedSource = "editor";
+        selectedTimelineIndex = -1;
+      }
+    }, true);
+
+    // Add mode/persistence metadata to the repair call. Other fetches are untouched.
+    if (!window.fetch.__openaiRepairModeWrapped) {
+      const nativeFetch = window.fetch.bind(window);
+      const wrappedFetch = (input, init = {}) => {
+        const url = typeof input === "string" ? input : String(input?.url || "");
+        const body = init?.body;
+        if (url.split("?", 1)[0].endsWith("/openai-repair") && body instanceof FormData) {
+          body.set("repair_mode", mode.value);
+          if (selectedSource === "live" && selectedTimelineIndex >= 0) {
+            const jobId = currentJobId();
+            if (jobId) {
+              body.set("job_id", jobId);
+              body.set("timeline_index", String(selectedTimelineIndex));
+            }
+          }
+        }
+        return nativeFetch(input, init);
+      };
+      wrappedFetch.__openaiRepairModeWrapped = true;
+      window.fetch = wrappedFetch;
+    }
 
     // Manual really means manual: a painted region is mandatory for a direct repair.
     document.addEventListener("click", event => {
@@ -88,23 +140,23 @@ UI_PATCH = r'''
     refresh();
   }
 
-  // Keep the image canvas dominant on phones. The stage is explicitly fitted to
-  // the remaining viewport after the header, toolbar and compact action row.
+  // The canvas owns the available middle row. Explanatory text is deliberately
+  // compact so it cannot push a tall portrait frame out of view on a phone.
   const css = document.createElement("style");
   css.textContent = `
     .openai-repair-mode-wrap { display:grid; gap:6px; }
     .openai-repair-mode-wrap[hidden] { display:none !important; }
     .frame-detail-modal { padding:0 !important; }
-    .frame-detail-dialog { height:100svh !important; max-height:100svh !important; grid-template-rows:auto minmax(0,1fr) auto !important; }
-    .frame-detail-viewport { min-height:0 !important; overflow:hidden !important; padding:6px !important; }
+    .frame-detail-dialog { width:100% !important; height:100svh !important; max-height:100svh !important; grid-template-rows:auto minmax(0,1fr) auto !important; border-radius:0 !important; }
+    .frame-detail-viewport { min-width:0 !important; min-height:0 !important; overflow:hidden !important; padding:6px !important; }
     .frame-detail-stage { max-width:none !important; max-height:none !important; }
-    .frame-detail-image { max-width:none !important; max-height:none !important; width:100% !important; height:100% !important; object-fit:contain !important; }
-    .frame-detail-actions { padding:7px 10px !important; gap:7px !important; }
-    .frame-detail-status { flex:1 1 100% !important; max-height:2.7em; overflow:auto; font-size:.72rem !important; line-height:1.3 !important; }
+    .frame-detail-image { display:block !important; max-width:none !important; max-height:none !important; width:100% !important; height:100% !important; object-fit:contain !important; }
+    .frame-detail-actions { padding:6px 10px calc(6px + env(safe-area-inset-bottom)) !important; gap:6px !important; }
+    .frame-detail-status { flex:1 1 100% !important; max-height:2.55em; overflow:auto; font-size:.7rem !important; line-height:1.25 !important; }
     .frame-detail-actions .primary { flex:1 1 auto; }
     @media (min-width:621px) {
       .frame-detail-modal { padding:12px !important; }
-      .frame-detail-dialog { height:min(900px,calc(100svh - 24px)) !important; }
+      .frame-detail-dialog { width:min(1180px,100%) !important; height:min(900px,calc(100svh - 24px)) !important; border-radius:16px !important; }
       .frame-detail-status { flex:1 1 260px !important; max-height:4em; }
     }
   `;
@@ -124,18 +176,18 @@ UI_PATCH = r'''
 
     function fit() {
       if (modal.hidden || !image.naturalWidth || !image.naturalHeight) return;
-      const style = getComputedStyle(viewport);
-      const availableWidth = Math.max(1, viewport.clientWidth - parseFloat(style.paddingLeft || 0) - parseFloat(style.paddingRight || 0));
-      const availableHeight = Math.max(1, viewport.clientHeight - parseFloat(style.paddingTop || 0) - parseFloat(style.paddingBottom || 0));
-      const scale = Math.min(1, availableWidth / image.naturalWidth, availableHeight / image.naturalHeight);
-      stage.style.width = `${Math.max(1, Math.floor(image.naturalWidth * scale))}px`;
-      stage.style.height = `${Math.max(1, Math.floor(image.naturalHeight * scale))}px`;
+      const viewportStyle = getComputedStyle(viewport);
+      const availableWidth = Math.max(1, viewport.clientWidth - parseFloat(viewportStyle.paddingLeft || 0) - parseFloat(viewportStyle.paddingRight || 0));
+      const availableHeight = Math.max(1, viewport.clientHeight - parseFloat(viewportStyle.paddingTop || 0) - parseFloat(viewportStyle.paddingBottom || 0));
+      const fitScale = Math.min(1, availableWidth / image.naturalWidth, availableHeight / image.naturalHeight);
+      stage.style.width = `${Math.max(1, Math.floor(image.naturalWidth * fitScale))}px`;
+      stage.style.height = `${Math.max(1, Math.floor(image.naturalHeight * fitScale))}px`;
       image.style.width = "100%";
       image.style.height = "100%";
     }
 
     image.addEventListener("load", () => requestAnimationFrame(fit));
-    new ResizeObserver(() => requestAnimationFrame(fit)).observe(viewport);
+    if (typeof ResizeObserver === "function") new ResizeObserver(() => requestAnimationFrame(fit)).observe(viewport);
     new MutationObserver(() => { if (!modal.hidden) requestAnimationFrame(fit); }).observe(modal, { attributes:true, attributeFilter:["hidden"] });
     window.addEventListener("resize", () => requestAnimationFrame(fit));
   }
@@ -168,9 +220,8 @@ def _install_ui_patch() -> None:
     app_all = sys.modules.get("app_all")
     if app_all is None or not hasattr(app_all, "WORKSPACE_SCRIPT"):
         return
-    marker = b"/* openai-repair-mode-ui-v1 */"
     current = bytes(app_all.WORKSPACE_SCRIPT)
-    if marker in current:
+    if b"/* openai-repair-mode-ui-v2 */" in current:
         return
     app_all.WORKSPACE_SCRIPT = current + b"\n\n" + UI_PATCH.encode("utf-8") + b"\n"
 
