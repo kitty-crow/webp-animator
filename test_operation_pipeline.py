@@ -32,11 +32,27 @@ class OperationPipelineTests(unittest.TestCase):
             ["gap", "repair", "interpolate"],
         )
 
-    def test_explicit_pipeline_preserves_repeated_reordered_passes(self):
+    def test_explicit_pipeline_preserves_order_and_repeats_up_to_four_passes(self):
         self.assertEqual(
             operation_pipeline.parse_pipeline("interpolate,gap,repair,gap,interpolate"),
-            ["interpolate", "gap", "repair", "gap", "interpolate"],
+            ["interpolate", "gap", "repair", "gap"],
         )
+
+    def test_openai_repair_token_selects_same_repair_pass(self):
+        settings = {
+            "frame_generator": "none",
+            "interpolator": "none",
+            "target_gaps": "repair:openai",
+        }
+        self.assertEqual(operation_pipeline.repair_engine(settings), "openai")
+        self.assertEqual(operation_pipeline.default_pipeline(settings), ["repair"])
+
+    def test_explicit_repair_engine_takes_precedence(self):
+        settings = {
+            "repair_engine": "propainter",
+            "target_gaps": "repair:openai",
+        }
+        self.assertEqual(operation_pipeline.repair_engine(settings), "propainter")
 
     def test_speed_two_frames_is_fixed_two_not_adaptive_zero(self):
         self.assertEqual(operation_pipeline._gap_count({"frames_to_fill": 2}), 2)
