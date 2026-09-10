@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import threading
@@ -193,6 +194,33 @@ def _analysis_update(job_id: str, analysis_id: str, **changes):
     return state
 
 
+def _sha256_payloads(uploads: list[tuple[str, bytes]]) -> list[str]:
+    return [hashlib.sha256(payload).hexdigest() for _, payload in uploads]
+
+
+def _sha256_paths(paths: list[Path]) -> list[str]:
+    result: list[str] = []
+    for path in paths:
+        digest = hashlib.sha256()
+        with Path(path).open("rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        result.append(digest.hexdigest())
+    return result
+
+
+def _stored_source_paths(job_id: str) -> list[Path]:
+    job = GLOBAL.get(job_id)
+    if not isinstance(job, dict):
+        return []
+    job_dir = GLOBAL.job_dir(job_id)
+    paths = [job_dir / str(item.get("path", "")) for item in list(job.get("sources", []))]
+    return paths if paths and all(path.is_file() for path in paths) else []
+
+
 def _stage_analysis_sources(
     job_id: str,
     analysis_id: str,
@@ -255,7 +283,10 @@ def _run_analysis(job_id: str, analysis_id: str, paths: list[Path], settings: di
         )
 
     try:
-        result = temporal_v2.analyse_paths(legacy, paths, settings, progress=report)
+        result = dict(temporal_v2.analyse_paths(legacy, paths, settings, progress=report))
+        current = GLOBAL.get(job_id) or {}
+        analysis = dict(current.get("analysis") or {})
+        result["source_sha256"] = list(analysis.get("source_sha256") or _sha256_paths(paths))
         _analysis_update(
             job_id,
             analysis_id,
@@ -480,7 +511,7 @@ class Handler(legacy.Handler):
 
         super().do_GET()
 
-    def _parse_frame_upload(self):
+    def _parse_frame_upload(self, *, require_frames: bool = True):
         content_type, body = self.read_upload_body()
         fields, uploads_raw = legacy.parse_multipart(content_type, body)
         selected = [
@@ -488,7 +519,7 @@ class Handler(legacy.Handler):
             for field, filename, payload in uploads_raw
             if field == "frames" and filename
         ]
-        if not selected:
+        if require_frames and not selected:
             raise ValueError("No frames were uploaded.")
         for filename, _ in selected:
             if Path(filename).suffix.lower() not in legacy.ALLOWED_EXTENSIONS:
@@ -516,8 +547,13 @@ class Handler(legacy.Handler):
                 settings = _settings_from_fields(fields)
                 requested = str(fields.get("global_job_id", "")).strip().lower()
                 job_id = requested or GLOBAL.new_id()
-                GLOBAL.ensure(job_id)
+                # Analysis upload becomes the durable source set for this job. The
+                # isolated analysis snapshot remains separate so an in-flight analysis
+                # never races a later render, but Generate WebP does not need the bytes
+                # uploaded again when the browser still has this exact frame set.
+                GLOBAL.save_sources(job_id, selected, settings)
                 analysis_id = uuid.uuid4().hex
+                source_sha256 = _sha256_payloads(selected)
                 paths, sources = _stage_analysis_sources(job_id, analysis_id, selected)
                 GLOBAL.update(
                     job_id,
@@ -529,6 +565,7 @@ class Handler(legacy.Handler):
                         "error": None,
                         "settings": settings,
                         "sources": sources,
+                        "source_sha256": source_sha256,
                         "result": None,
                     },
                 )
@@ -549,11 +586,46 @@ class Handler(legacy.Handler):
 
         if path == "/generate":
             try:
-                fields, selected = self._parse_frame_upload()
+                fields, selected = self._parse_frame_upload(require_frames=False)
                 requested = str(fields.get("global_job_id", "")).strip().lower()
                 job_id = requested or GLOBAL.new_id()
                 settings = _settings_from_fields(fields)
-                _, paths = GLOBAL.begin_render(job_id, selected, settings)
+
+                if selected:
+                    _, paths = GLOBAL.begin_render(job_id, selected, settings)
+                else:
+                    if fields.get("reuse_analysis_sources") != "on" or not requested:
+                        raise ValueError("No frames were uploaded and no analysed source set was requested.")
+                    job = GLOBAL.get(job_id)
+                    if not isinstance(job, dict):
+                        raise ValueError("The analysed job is no longer available.")
+                    analysis = dict(job.get("analysis") or {})
+                    result = dict(analysis.get("result") or {})
+                    stored_hashes = [str(value).lower() for value in result.get("source_sha256", [])]
+                    requested_hashes = [
+                        value.strip().lower()
+                        for value in str(fields.get("analysis_source_sha256", "")).split(",")
+                        if value.strip()
+                    ]
+                    paths = _stored_source_paths(job_id)
+                    if (
+                        str(analysis.get("status", "")) != "done"
+                        or not stored_hashes
+                        or requested_hashes != stored_hashes
+                        or not paths
+                        or _sha256_paths(paths) != stored_hashes
+                    ):
+                        raise ValueError("The analysed source set no longer matches this job; upload the current frames once to refresh it.")
+                    GLOBAL.update(
+                        job_id,
+                        settings=settings,
+                        status="queued",
+                        progress=5,
+                        message="Reusing analysed source frames already on the server",
+                        error=None,
+                        render_count=int(job.get("render_count", 0)) + 1,
+                    )
+
                 _start_global_render(job_id, paths, settings)
                 self.send_json(202, {"job_id": job_id, "global_job_id": job_id})
             except OverflowError as exc:
