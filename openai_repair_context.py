@@ -10,14 +10,29 @@ import urllib.request
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from PIL import Image, ImageDraw, ImageOps
+from PIL import Image, ImageChops, ImageDraw, ImageOps
 
 import openai_repair as base
 
 DEFAULT_MODEL = base.DEFAULT_MODEL
 DEFAULT_QUALITY = base.DEFAULT_QUALITY
-REPAIR_PROMPT = base.REPAIR_PROMPT
 status = base.status
+
+REPAIR_PROMPT = """You are a defect-repair tool for ONE already-generated animation frame. You are not an animator and you are not allowed to invent a new in-between frame.
+
+IMAGE 1 is the candidate frame to edit. It already represents the intended moment in time. Preserve its pose, timing, camera, framing, scale, perspective, silhouette, colours, lighting and composition.
+IMAGE 2 is the immediately previous temporal anchor.
+IMAGE 3 is the immediately next temporal anchor.
+A fourth image may contain the full animation in playback order and is CONTEXT ONLY.
+
+Your only job is to remove or repaint visible GENERATION DEFECTS in IMAGE 1. Typical defects include doubled/ghost limbs or tails, smeared anatomy, duplicated edges, malformed hands/feet/facial details, broken clothing geometry, corrupted texture, bad occlusion reconstruction, or other obvious synthesis artefacts.
+
+DO NOT add motion blur. DO NOT add ghost images. DO NOT create duplicate limbs, tails, ears, hands, feet, edges or silhouettes. DO NOT average the neighbouring poses together. DO NOT move the subject toward either anchor. DO NOT redesign or beautify the frame. DO NOT alter clean regions merely to make the rendering more consistent.
+
+If the candidate already looks correct in an area, leave that area unchanged. Make the smallest local paint-over needed to remove the defect while keeping the candidate at exactly the same temporal state.
+
+When an edit mask is supplied, the marked region is the user's explicit defect location. Repair only that marked region; anything outside it must remain unchanged. Transparency is owned by the application and must not be reinterpreted.
+""".strip()
 
 
 def _multiple_of_16(value: int) -> int:
@@ -58,12 +73,7 @@ def _checkerboard(size: tuple[int, int], cell: int = 16) -> Image.Image:
 
 
 def _context_sheet(frames: Sequence[Image.Image], target_index: int) -> Image.Image:
-    """Build one labelled visual containing every current animation frame.
-
-    Keeping the entire sequence in a single context image avoids arbitrary image-count
-    limits while still giving the image model global motion/style context for each
-    local repair call.
-    """
+    """Build one labelled visual containing every current animation frame."""
     count = max(1, len(frames))
     columns = max(1, math.ceil(math.sqrt(count)))
     rows = max(1, math.ceil(count / columns))
@@ -73,12 +83,8 @@ def _context_sheet(frames: Sequence[Image.Image], target_index: int) -> Image.Im
     sheet = _checkerboard((columns * cell, rows * cell), max(8, cell // 12))
     draw = ImageDraw.Draw(sheet)
 
-    previous_index = target_index - 1
-    next_index = target_index + 1
-    if target_index == 0:
-        previous_index = count - 1
-    if target_index == count - 1:
-        next_index = 0
+    previous_index = target_index - 1 if target_index > 0 else count - 1
+    next_index = target_index + 1 if target_index < count - 1 else 0
 
     for index, source in enumerate(frames):
         col = index % columns
@@ -103,18 +109,17 @@ def _context_sheet(frames: Sequence[Image.Image], target_index: int) -> Image.Im
         if role:
             draw.rectangle((x0 + 1, y0 + 1, x0 + cell - 2, y0 + cell - 2), outline=(255, 96, 96, 255), width=max(2, cell // 80))
 
-    padded = (_multiple_of_16(sheet.width), _multiple_of_16(sheet.height))
-    return _pad_rgba(sheet, padded)
+    return _pad_rgba(sheet, (_multiple_of_16(sheet.width), _multiple_of_16(sheet.height)))
 
 
 def _augment_prompt(prompt: str, target_index: int, frame_count: int) -> str:
     return (
         str(prompt).strip()
-        + "\n\nImage 4 is a labelled contact sheet containing the ENTIRE current animation in playback order. "
+        + "\n\nIMAGE 4 is a labelled contact sheet containing the ENTIRE current animation in playback order. "
         + f"The edit target is Frame {target_index + 1} of {frame_count}. "
-        + "Use Image 4 as global context for identity, proportions, style, motion direction, cadence, recurring details and loop continuity. "
-        + "Images 2 and 3 are still the immediate temporal anchors around Image 1, so they control the local in-between state. "
-        + "Do not invent a different temporal pose merely because another frame in the global context looks cleaner."
+        + "Use IMAGE 4 only to understand persistent identity, proportions, clothing/details, motion direction, cadence and loop continuity. "
+        + "IMAGE 2 and IMAGE 3 define the immediate temporal neighbourhood around IMAGE 1. "
+        + "Do not borrow a cleaner pose from another frame. Do not interpolate again. Repair synthesis artefacts in IMAGE 1 only."
     )
 
 
@@ -169,11 +174,7 @@ def _image_edit(
     request = urllib.request.Request(
         f"{base._base()}/images/edits",
         data=body,
-        headers={
-            "Authorization": f"Bearer {key}",
-            "Content-Type": content_type,
-            "Accept": "application/json",
-        },
+        headers={"Authorization": f"Bearer {key}", "Content-Type": content_type, "Accept": "application/json"},
         method="POST",
     )
 
@@ -211,8 +212,63 @@ def _image_edit(
         repaired = image.convert("RGBA").copy()
     if repaired.size != api_size:
         repaired = repaired.resize(api_size, Image.Resampling.LANCZOS)
-    repaired = repaired.crop((0, 0, original_size[0], original_size[1]))
-    return repaired, value
+    return repaired.crop((0, 0, original_size[0], original_size[1])), value
+
+
+def _change_fraction(candidate: Image.Image, repaired: Image.Image, threshold: int = 28) -> float:
+    """Fraction of visible candidate pixels materially repainted by the model."""
+    candidate = candidate.convert("RGBA")
+    repaired = repaired.convert("RGBA")
+    rgb_diff = ImageChops.difference(candidate.convert("RGB"), repaired.convert("RGB"))
+    channels = rgb_diff.split()
+    changed = Image.new("L", candidate.size, 0)
+    cp = changed.load()
+    rp, gp, bp = (channel.load() for channel in channels)
+    alpha = candidate.getchannel("A").load()
+    visible = 0
+    changed_count = 0
+    for y in range(candidate.height):
+        for x in range(candidate.width):
+            if alpha[x, y] <= 8:
+                continue
+            visible += 1
+            if max(rp[x, y], gp[x, y], bp[x, y]) >= threshold:
+                cp[x, y] = 255
+                changed_count += 1
+    return changed_count / max(1, visible)
+
+
+def _constrain_and_guard(
+    candidate: Image.Image,
+    repaired: Image.Image,
+    selection: Image.Image | None,
+) -> tuple[Image.Image, dict]:
+    constrained = base._constrain_result(candidate, repaired, selection)
+    if selection is not None and selection.getbbox():
+        return constrained, {"accepted": True, "guard": "manual-mask", "changed_fraction": None}
+
+    # Auto repair is allowed to work without a user mask, but it is not allowed to
+    # turn into a full-frame redraw. A broad repaint is safer to reject than to replace
+    # a deterministic candidate with a newly hallucinated pose/ghosting pattern.
+    fraction = _change_fraction(candidate, constrained)
+    try:
+        limit = float(base._setting("OPENAI_REPAIR_MAX_AUTO_CHANGE", "0.18"))
+    except (TypeError, ValueError):
+        limit = 0.18
+    limit = max(0.02, min(0.75, limit))
+    if fraction > limit:
+        return candidate.convert("RGBA").copy(), {
+            "accepted": False,
+            "guard": "broad-repaint-rejected",
+            "changed_fraction": round(fraction, 6),
+            "max_changed_fraction": limit,
+        }
+    return constrained, {
+        "accepted": True,
+        "guard": "auto-locality",
+        "changed_fraction": round(fraction, 6),
+        "max_changed_fraction": limit,
+    }
 
 
 def repair_triplet(
@@ -245,7 +301,7 @@ def repair_triplet(
         quality=str(quality or base._setting("OPENAI_REPAIR_QUALITY", DEFAULT_QUALITY)).lower(),
         prompt=str(prompt or REPAIR_PROMPT),
     )
-    result = base._constrain_result(candidate, repaired, selection)
+    result, guard = _constrain_and_guard(candidate, repaired, selection)
     return result, {
         "engine": "openai",
         "model": str(model or base._setting("OPENAI_REPAIR_MODEL", DEFAULT_MODEL)),
@@ -257,6 +313,7 @@ def repair_triplet(
         "context_frames": len(sequence),
         "api_canvas": [_multiple_of_16(candidate.width), _multiple_of_16(candidate.height)],
         "source_canvas": [candidate.width, candidate.height],
+        **guard,
     }
 
 
@@ -284,8 +341,10 @@ def repair_images(
     output_dir = Path(work_dir) / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
     repaired_count = 0
+    rejected_count = 0
     skipped: list[int] = []
     usage: list[dict] = []
+    guards: list[dict] = []
 
     for ordinal, index in enumerate(targets, start=1):
         previous_index = index - 1
@@ -320,10 +379,14 @@ def repair_images(
             quality=quality,
             prompt=prompt,
         )
-        result = base._constrain_result(candidate, repaired, selection)
+        result, guard = _constrain_and_guard(candidate, repaired, selection)
         frames[index] = result
         result.save(output_dir / f"{index:06d}.png")
-        repaired_count += 1
+        guards.append(dict(index=index, **guard))
+        if guard.get("accepted"):
+            repaired_count += 1
+        else:
+            rejected_count += 1
         if isinstance(response.get("usage"), dict):
             usage.append(response["usage"])
         if progress:
@@ -333,12 +396,14 @@ def repair_images(
     return frames, {
         "audited": len(targets),
         "repaired": repaired_count,
+        "rejected": rejected_count,
         "skipped": skipped,
         "engine": "openai",
         "model": model,
         "quality": quality,
         "manual_masks": sum(1 for index in targets if index in masks),
         "usage": usage,
+        "guards": guards,
         "alpha_policy": "candidate-alpha-authoritative",
         "context_policy": "whole-animation-contact-sheet",
         "context_frames": len(frames),
