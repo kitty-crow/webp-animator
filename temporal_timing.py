@@ -60,6 +60,7 @@ def install(advanced_pipeline_module):
     import app as legacy
     import job_control
     import live_timeline
+    import looped_animation
     import openai_repair_http
     import operation_pipeline
     import pipeline_settings
@@ -72,6 +73,7 @@ def install(advanced_pipeline_module):
     # live_timeline merges in-progress worker output into the right slots and makes
     # repair engines replace repaired slots instead of appending duplicate frame cards.
     operation_pipeline.install(temporal_v2)
+    looped_animation.install(temporal_v2)
     timeline_pipeline.install(operation_pipeline)
     pipeline_settings.install(temporal_v2)
     temporal_repair.install(temporal_v2)
