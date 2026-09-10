@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 
 from PIL import Image
 
-import openai_repair
+import openai_repair_context as openai_repair
 
 ROOT = Path(__file__).resolve().parent
 UI_SCRIPT = ROOT / "openai_repair_ui.js"
@@ -62,9 +62,12 @@ def install() -> None:
             content_type, body = handler.read_upload_body()
             fields, uploads = legacy.parse_multipart(content_type, body)
             by_field: dict[str, tuple[str, bytes]] = {}
+            context_uploads: list[tuple[str, bytes]] = []
             for field, filename, payload in uploads:
                 if field in {"previous", "candidate", "following", "mask"} and filename:
                     by_field[field] = (filename, payload)
+                elif field == "context" and filename:
+                    context_uploads.append((filename, payload))
             for required in ("previous", "candidate", "following"):
                 if required not in by_field:
                     raise ValueError(f"Missing {required} frame.")
@@ -76,13 +79,28 @@ def install() -> None:
                 raise ValueError("Previous, candidate and next frames must use the same canvas size.")
             mask = _load_rgba(by_field["mask"][1], "Defect mask") if "mask" in by_field else None
 
+            context_frames = [
+                _load_rgba(payload, f"Context frame {index + 1}")
+                for index, (_, payload) in enumerate(context_uploads)
+            ]
+            if context_frames and any(frame.size != candidate.size for frame in context_frames):
+                raise ValueError("Whole-animation context frames must use the same canvas size as the candidate.")
+            if not context_frames:
+                context_frames = [previous, candidate, following]
+            try:
+                target_index = int(str(fields.get("candidate_index", "1") or "1"))
+            except ValueError:
+                target_index = 1
+            target_index = max(0, min(len(context_frames) - 1, target_index))
+
             with tempfile.TemporaryDirectory(prefix="webp-openai-repair-") as temporary:
-                repaired, stats = openai_repair.repair_images(
-                    [previous, candidate, following],
-                    [1],
-                    Path(temporary),
-                    masks={1: mask} if mask is not None else None,
-                    loop=False,
+                repaired, stats = openai_repair.repair_triplet(
+                    previous,
+                    candidate,
+                    following,
+                    context_frames=context_frames,
+                    target_index=target_index,
+                    mask=mask,
                     model=str(fields.get("model", "") or openai_repair.DEFAULT_MODEL),
                     quality=str(fields.get("quality", "") or openai_repair.DEFAULT_QUALITY),
                     prompt=str(fields.get("prompt", "") or openai_repair.REPAIR_PROMPT),
@@ -90,10 +108,10 @@ def install() -> None:
             handler.send_json(
                 200,
                 {
-                    "image_b64": _png_b64(repaired[1]),
+                    "image_b64": _png_b64(repaired),
                     "mime": "image/png",
-                    "width": repaired[1].width,
-                    "height": repaired[1].height,
+                    "width": repaired.width,
+                    "height": repaired.height,
                     "stats": stats,
                 },
             )
