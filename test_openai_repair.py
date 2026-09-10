@@ -71,6 +71,31 @@ class OpenAIRepairTests(unittest.TestCase):
         self.assertGreater(sheet.width, 0)
         self.assertGreater(sheet.height, 0)
 
+    def test_auto_guard_rejects_a_broad_repaint_and_keeps_candidate(self):
+        candidate = Image.new("RGBA", (20, 20), (10, 20, 30, 255))
+        hallucinated = Image.new("RGBA", (20, 20), (240, 210, 180, 255))
+        with mock.patch.dict(os.environ, {"OPENAI_REPAIR_MAX_AUTO_CHANGE": "0.18"}):
+            result, guard = openai_repair_context._constrain_and_guard(candidate, hallucinated, None)
+        self.assertFalse(guard["accepted"])
+        self.assertEqual(guard["guard"], "broad-repaint-rejected")
+        self.assertEqual(list(result.getdata()), list(candidate.getdata()))
+
+    def test_manual_mask_bypasses_broad_repaint_but_only_inside_mask(self):
+        candidate = Image.new("RGBA", (8, 8), (10, 20, 30, 255))
+        hallucinated = Image.new("RGBA", (8, 8), (220, 40, 60, 255))
+        selection = Image.new("L", candidate.size, 0)
+        selection.putpixel((3, 4), 255)
+        result, guard = openai_repair_context._constrain_and_guard(candidate, hallucinated, selection)
+        self.assertTrue(guard["accepted"])
+        self.assertEqual(result.getpixel((3, 4))[:3], (220, 40, 60))
+        self.assertEqual(result.getpixel((0, 0)), candidate.getpixel((0, 0)))
+
+    def test_repair_prompt_forbids_ghosting_and_reanimation(self):
+        prompt = openai_repair_context.REPAIR_PROMPT.lower()
+        self.assertIn("do not add motion blur", prompt)
+        self.assertIn("ghost images", prompt)
+        self.assertIn("not allowed to invent a new in-between frame", prompt)
+
     def test_dotenv_key_is_visible_without_process_restart(self):
         with tempfile.TemporaryDirectory() as temporary:
             dotenv = Path(temporary) / ".env"
