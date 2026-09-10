@@ -3,9 +3,12 @@
 
   const MAX_UNDO = 20;
   const PAN_PIXELS_FOR_FULL_RANGE = 300;
+  const ACTIVE_JOB_KEY = "webp-animator-active-job";
   const masks = new Map();
   let currentItem = null;
   let currentIndex = -1;
+  let currentSource = "editor";
+  let currentLiveCard = null;
   let zoom = 1;
   let posX = 50;
   let posY = 50;
@@ -36,11 +39,11 @@
     .frame-detail-image { display:block; width:auto; height:auto; max-width:100%; max-height:68dvh; object-fit:contain; pointer-events:none; -webkit-user-drag:none; }
     .frame-detail-mask { position:absolute; inset:0; width:100%; height:100%; pointer-events:auto; }
     .frame-detail-mask.pan-mode { cursor:move; }
-    .frame-detail-status { flex:1 1 260px; font-size:.8rem; opacity:.78; line-height:1.35; }
+    .frame-detail-status { flex:1 1 260px; font-size:.8rem; opacity:.82; line-height:1.35; }
     .frame-detail-actions { border-top:1px solid color-mix(in srgb, CanvasText 14%, transparent); }
     .frame-detail-actions .primary { background:Highlight; color:HighlightText; border-color:Highlight; }
     .frame-detail-close { font-size:1.1rem !important; padding:5px 9px !important; }
-    .thumb[data-frame-detail-ready="1"] { cursor:zoom-in; }
+    #frameStrip .thumb,.live-frame-card img { cursor:zoom-in; }
     @media (max-width:620px) {
       .frame-detail-modal { padding:0; }
       .frame-detail-dialog { width:100%; height:100dvh; max-height:100dvh; border-radius:0; border-inline:0; }
@@ -79,9 +82,9 @@
         </div>
       </div>
       <div class="frame-detail-actions">
-        <div class="frame-detail-status" data-detail-status>Paint over a defect to tell OpenAI where to concentrate the repair. Transparency is preserved from this candidate frame.</div>
+        <div class="frame-detail-status" data-detail-status>Paint over the defect. OpenAI receives the whole animation for context plus the immediate previous and next frames.</div>
         <button type="button" data-detail-close>Close</button>
-        <button type="button" class="primary" data-repair>Repair with OpenAI</button>
+        <button type="button" class="primary" data-repair>Repair marked frame with OpenAI</button>
       </div>
     </section>`;
   document.body.appendChild(modal);
@@ -98,14 +101,18 @@
   const markButton = modal.querySelector('[data-mode="mark"]');
   const panButton = modal.querySelector('[data-mode="pan"]');
 
-  function frameList() {
+  function editorFrames() {
     try { return Array.isArray(frames) ? frames : []; }
     catch { return []; }
   }
 
-  function setStatus(text) {
-    status.textContent = String(text || "");
+  function loopEnabled() {
+    if (document.getElementById("loopedAnimation")?.checked) return true;
+    const raw = String(document.getElementById("targetGaps")?.value || "").toLowerCase();
+    return raw.split(",").map(value => value.trim()).includes("looped-animation");
   }
+
+  function setStatus(text) { status.textContent = String(text || ""); }
 
   function updateView() {
     stage.style.transformOrigin = `${posX}% ${posY}%`;
@@ -137,6 +144,10 @@
     updateView();
   }
 
+  function maskKey(item, index, source) {
+    return source === "live" ? `live:${activeJobId()}:${index}` : String(item?.id || `editor:${index}`);
+  }
+
   function canvasPoint(event) {
     const rect = canvas.getBoundingClientRect();
     if (!rect.width || !rect.height) return null;
@@ -154,9 +165,8 @@
 
   function drawSegment(from, to) {
     if (!from || !to) return;
-    const scale = image.naturalWidth && image.getBoundingClientRect().width
-      ? image.naturalWidth / image.getBoundingClientRect().width
-      : 1;
+    const display = image.getBoundingClientRect();
+    const scale = image.naturalWidth && display.width ? image.naturalWidth / display.width : 1;
     context.save();
     context.strokeStyle = "rgba(255, 48, 80, .72)";
     context.fillStyle = "rgba(255, 48, 80, .72)";
@@ -170,22 +180,18 @@
     context.restore();
   }
 
-  function currentMaskBlob() {
-    return new Promise(resolve => canvas.toBlob(resolve, "image/png"));
-  }
+  function currentMaskBlob() { return new Promise(resolve => canvas.toBlob(resolve, "image/png")); }
 
   function saveCurrentMask() {
     if (!currentItem) return;
-    canvas.toBlob(blob => {
-      if (!blob || !currentItem) return;
-      masks.set(currentItem.id, blob);
-    }, "image/png");
+    const key = maskKey(currentItem, currentIndex, currentSource);
+    canvas.toBlob(blob => { if (blob) masks.set(key, blob); }, "image/png");
   }
 
-  function loadMask(item) {
+  function loadMask() {
     context.clearRect(0, 0, canvas.width, canvas.height);
     undo = [];
-    const blob = masks.get(item.id);
+    const blob = masks.get(maskKey(currentItem, currentIndex, currentSource));
     if (!blob) return;
     const url = URL.createObjectURL(blob);
     const saved = new Image();
@@ -201,28 +207,34 @@
   function hasMarkedPixels() {
     if (!canvas.width || !canvas.height) return false;
     const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
-    for (let offset = 3; offset < pixels.length; offset += 4) {
-      if (pixels[offset] > 0) return true;
-    }
+    for (let offset = 3; offset < pixels.length; offset += 4) if (pixels[offset] > 0) return true;
     return false;
   }
 
-  function openFrame(item, index) {
+  function canRepair(index, count) {
+    if (count < 3) return false;
+    return loopEnabled() || (index > 0 && index < count - 1);
+  }
+
+  function openFrame(item, index, source = "editor", liveCard = null, count = null) {
     currentItem = item;
     currentIndex = index;
+    currentSource = source;
+    currentLiveCard = liveCard;
     resetView();
     setMode("mark");
-    title.textContent = `Frame ${index + 1} · ${item.displayName || item.file?.name || "image"}`;
-    repairButton.disabled = index <= 0 || index >= frameList().length - 1;
+    const total = count == null ? editorFrames().length : count;
+    title.textContent = `Frame ${index + 1} · ${item.displayName || item.name || item.file?.name || "image"}`;
+    repairButton.disabled = !canRepair(index, total);
     setStatus(repairButton.disabled
-      ? "OpenAI repair needs both a previous and a next frame. This edge frame can still be inspected and marked."
-      : "Paint over a defect to tell OpenAI exactly where to concentrate the repair. With no marks, the whole visible candidate is eligible for repair. Candidate alpha is always preserved.");
+      ? "This frame needs both temporal neighbours before OpenAI repair can run."
+      : "Paint over a defect to target it precisely. OpenAI receives the entire animation as global context and the immediate previous/candidate/next triplet at full resolution. Candidate transparency remains authoritative.");
     modal.hidden = false;
     document.documentElement.style.overflow = "hidden";
     image.onload = () => {
       canvas.width = Math.max(1, image.naturalWidth);
       canvas.height = Math.max(1, image.naturalHeight);
-      loadMask(item);
+      loadMask();
     };
     image.src = item.url;
     modal.querySelector("[data-detail-close]").focus();
@@ -236,25 +248,67 @@
     image.removeAttribute("src");
     currentItem = null;
     currentIndex = -1;
+    currentLiveCard = null;
     drawing = false;
     panning = false;
   }
 
+  function activeJobId() {
+    try { return localStorage.getItem(ACTIVE_JOB_KEY) || ""; }
+    catch { return ""; }
+  }
+
+  async function fileFromUrl(url, name) {
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) throw new Error(`Could not load context frame (${response.status})`);
+    const blob = await response.blob();
+    return new File([blob], name || "frame.png", { type: blob.type || "image/png" });
+  }
+
+  async function liveFramesForRepair() {
+    const jobId = activeJobId();
+    if (!jobId) throw new Error("No active/recent job is available for this live frame.");
+    const response = await fetch(`/live-frames?id=${encodeURIComponent(jobId)}`, { cache: "no-store" });
+    if (!response.ok) throw new Error(`Could not load live timeline (${response.status})`);
+    const value = await response.json();
+    const items = Array.isArray(value.frames) ? value.frames : [];
+    return await Promise.all(items.map(async (item, index) => ({
+      id: String(item.key || `live-${index}`),
+      name: String(item.name || `frame-${index + 1}.png`),
+      displayName: String(item.name || `frame-${index + 1}.png`),
+      url: String(item.url || ""),
+      file: await fileFromUrl(String(item.url || ""), String(item.name || `frame-${index + 1}.png`)),
+    })));
+  }
+
   async function repairCurrent() {
-    const list = frameList();
-    if (!currentItem || currentIndex <= 0 || currentIndex >= list.length - 1) return;
-    const previous = list[currentIndex - 1];
+    let list;
+    if (currentSource === "live") {
+      setStatus("Loading the complete live animation context…");
+      list = await liveFramesForRepair();
+    } else {
+      list = editorFrames();
+    }
+    if (!currentItem || !canRepair(currentIndex, list.length)) return;
+
+    const previousIndex = currentIndex > 0 ? currentIndex - 1 : list.length - 1;
+    const followingIndex = currentIndex < list.length - 1 ? currentIndex + 1 : 0;
     const candidate = list[currentIndex];
-    const following = list[currentIndex + 1];
-    if (!previous?.file || !candidate?.file || !following?.file) return;
+    const previous = list[previousIndex];
+    const following = list[followingIndex];
+    if (!previous?.file || !candidate?.file || !following?.file) throw new Error("The repair context is incomplete.");
 
     repairButton.disabled = true;
-    setStatus("Uploading previous + candidate + next frame for constrained OpenAI repair…");
+    setStatus(`Sending Frame ${currentIndex + 1} with both neighbours and all ${list.length} animation frames as context…`);
     try {
       const data = new FormData();
       data.append("previous", previous.file, previous.file.name || "previous.png");
       data.append("candidate", candidate.file, candidate.file.name || "candidate.png");
       data.append("following", following.file, following.file.name || "following.png");
+      data.append("candidate_index", String(currentIndex));
+      for (const [index, item] of list.entries()) {
+        data.append("context", item.file, item.file.name || `context-${index + 1}.png`);
+      }
       if (hasMarkedPixels()) {
         const mask = await currentMaskBlob();
         if (mask) data.append("mask", mask, "defect-mask.png");
@@ -272,41 +326,33 @@
       const oldName = candidate.displayName || candidate.file.name || `frame-${currentIndex + 1}.png`;
       const stem = oldName.replace(/\.[^.]+$/, "");
       const file = new File([bytes], `${stem}-openai-repaired.png`, { type: "image/png" });
-      URL.revokeObjectURL(candidate.url);
-      candidate.file = file;
-      candidate.displayName = file.name;
-      candidate.url = URL.createObjectURL(file);
-      masks.delete(candidate.id);
-      if (typeof renderFrames === "function") renderFrames();
-      image.src = candidate.url;
-      setStatus(`OpenAI repair complete. ${value.stats?.alpha_policy === "candidate-alpha-authoritative" ? "Original candidate transparency was preserved exactly." : ""}`.trim());
+      const repairedUrl = URL.createObjectURL(file);
+
+      if (currentSource === "editor") {
+        const actual = editorFrames()[currentIndex];
+        if (actual) {
+          if (actual.url?.startsWith("blob:")) URL.revokeObjectURL(actual.url);
+          actual.file = file;
+          actual.displayName = file.name;
+          actual.url = repairedUrl;
+          if (typeof renderFrames === "function") renderFrames();
+        }
+      } else if (currentLiveCard) {
+        const thumb = currentLiveCard.querySelector("img");
+        const download = currentLiveCard.querySelector("a");
+        if (thumb) thumb.src = repairedUrl;
+        if (download) { download.href = repairedUrl; download.download = file.name; }
+      }
+
+      masks.delete(maskKey(currentItem, currentIndex, currentSource));
+      image.src = repairedUrl;
+      const stats = value.stats || {};
+      setStatus(`Repair complete · whole-animation context: ${stats.context_frames || list.length} frames · source canvas ${stats.source_canvas?.join("×") || "preserved"} · API canvas ${stats.api_canvas?.join("×") || "valid"} · original alpha restored exactly.`);
     } catch (error) {
       setStatus(`Repair failed: ${error.message}`);
     } finally {
-      repairButton.disabled = currentIndex <= 0 || currentIndex >= frameList().length - 1;
+      repairButton.disabled = !canRepair(currentIndex, list.length);
     }
-  }
-
-  function decorateThumbnails() {
-    const list = frameList();
-    document.querySelectorAll("#frameStrip .frame-card .thumb").forEach((thumb, index) => {
-      if (thumb.dataset.frameDetailReady === "1") return;
-      thumb.dataset.frameDetailReady = "1";
-      thumb.tabIndex = 0;
-      thumb.setAttribute("role", "button");
-      thumb.setAttribute("aria-label", `${thumb.alt || `Frame ${index + 1}`} · open detailed repair view`);
-      const activate = event => {
-        event.preventDefault();
-        event.stopPropagation();
-        const current = frameList();
-        const item = current[index];
-        if (item) openFrame(item, index);
-      };
-      thumb.addEventListener("click", activate);
-      thumb.addEventListener("keydown", event => {
-        if (event.key === "Enter" || event.key === " ") activate(event);
-      });
-    });
   }
 
   canvas.addEventListener("pointerdown", event => {
@@ -356,7 +402,6 @@
   }
   canvas.addEventListener("pointerup", endPointer);
   canvas.addEventListener("pointercancel", endPointer);
-
   canvas.addEventListener("wheel", event => {
     if (!currentItem) return;
     setZoom(zoom + (event.deltaY < 0 ? .5 : -.5));
@@ -381,12 +426,32 @@
     if (!canvas.width || !canvas.height) return;
     saveUndo();
     context.clearRect(0, 0, canvas.width, canvas.height);
-    if (currentItem) masks.delete(currentItem.id);
+    if (currentItem) masks.delete(maskKey(currentItem, currentIndex, currentSource));
   });
-  repairButton.addEventListener("click", repairCurrent);
+  repairButton.addEventListener("click", () => { repairCurrent().catch(error => setStatus(`Repair failed: ${error.message}`)); });
 
-  const frameStrip = document.getElementById("frameStrip");
-  if (frameStrip) new MutationObserver(decorateThumbnails).observe(frameStrip, { childList: true, subtree: true });
-  window.addEventListener("DOMContentLoaded", decorateThumbnails, { once: true });
-  decorateThumbnails();
+  document.addEventListener("click", event => {
+    const editorThumb = event.target.closest?.("#frameStrip .frame-card .thumb");
+    if (editorThumb) {
+      event.preventDefault();
+      event.stopPropagation();
+      const thumbs = [...document.querySelectorAll("#frameStrip .frame-card .thumb")];
+      const index = thumbs.indexOf(editorThumb);
+      const item = editorFrames()[index];
+      if (item) openFrame(item, index, "editor", null, editorFrames().length);
+      return;
+    }
+
+    const liveImage = event.target.closest?.("#liveFrameGrid .live-frame-card img");
+    if (liveImage) {
+      event.preventDefault();
+      event.stopPropagation();
+      const cards = [...document.querySelectorAll("#liveFrameGrid .live-frame-card")];
+      const card = liveImage.closest(".live-frame-card");
+      const index = cards.indexOf(card);
+      if (index < 0) return;
+      const name = card.querySelector(".live-frame-name")?.textContent?.trim() || `frame-${index + 1}.png`;
+      openFrame({ id: `live-${index}`, name, displayName: name, url: liveImage.currentSrc || liveImage.src }, index, "live", card, cards.length);
+    }
+  }, true);
 })();
