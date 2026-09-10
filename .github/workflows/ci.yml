@@ -26,7 +26,7 @@ jobs:
             app.py app_all.py global_jobs.py anim_align_webp.py frame1_optimizer.py \
             rife_worker.py rife_selective_worker.py amt_worker.py eden_worker.py speed_worker.py \
             advanced_pipeline.py temporal_v2.py engine_paths.py gpu_match.py smart_frames.py \
-            webp_fast.py worker_common.py temporal_timing.py engine_progress.py looped_animation.py \
+            webp_fast.py worker_common.py temporal_timing.py engine_progress.py looped_animation.py geometry_cache.py \
             job_control.py live_timeline.py operation_pipeline.py pipeline_live.py pipeline_settings.py \
             temporal_repair.py propainter_repair_worker.py timeline_pipeline.py \
             openai_repair.py openai_repair_context.py openai_repair_http.py \
@@ -58,6 +58,7 @@ jobs:
           test_live_timeline.py
           test_openai_repair.py
           test_looped_animation.py
+          test_geometry_cache.py
 
       - name: Ensure the retired semantic interpolator stays retired
         shell: bash
