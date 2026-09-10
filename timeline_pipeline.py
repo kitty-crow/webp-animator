@@ -23,9 +23,6 @@ def _stage_for(record) -> str:
         return "Original"
     engine = str(getattr(record, "engine", "") or "generated")
     lower = engine.lower()
-    if "openai-repair" in lower:
-        prior = engine.replace("+openai-repair", "").replace("openai-repair+", "").strip("+")
-        return f"Repaired · {prior.upper() if prior else 'source'} + OpenAI"
     if "propainter" in lower:
         prior = engine.replace("+propainter", "").replace("propainter+", "").strip("+")
         return f"Repaired · {prior.upper() if prior else 'ProPainter'} + ProPainter"
