@@ -159,10 +159,21 @@ def _dynamic_engine(root: Path, job_id: str, pass_dir: Path, base: dict):
 
 def _dynamic_repair(root: Path, job_id: str, pass_dir: Path, base: dict):
     timeline = _base_items(root, job_id, base)
-    repaired_dir = pass_dir / "temporal-repair" / "output" / "frames"
-    if not repaired_dir.is_dir():
+    output_root = pass_dir / "temporal-repair" / "output"
+    if not output_root.is_dir():
         return timeline
-    for path in repaired_dir.glob("*.png"):
+
+    engine = str(base.get("engine", "propainter") or "propainter").lower()
+    if engine == "openai":
+        label = "OpenAI"
+        engine_name = "openai-repair"
+    else:
+        label = "ProPainter"
+        engine_name = "propainter"
+
+    paths = list((output_root / "frames").glob("*.png")) if (output_root / "frames").is_dir() else []
+    paths.extend(path for path in output_root.glob("*.png") if path not in paths)
+    for path in paths:
         try:
             index = int(path.stem)
         except ValueError:
@@ -177,10 +188,10 @@ def _dynamic_repair(root: Path, job_id: str, pass_dir: Path, base: dict):
             job_id,
             key=previous.get("key", f"timeline:{index}"),
             name=previous.get("name", path.name),
-            stage=f"Repaired · ProPainter · {prior_stage}",
+            stage=f"Repaired · {label} · {prior_stage}",
             rel=rel,
             generated=previous.get("generated", False),
-            engine="propainter",
+            engine=engine_name,
         )
         if item:
             timeline[index] = item
