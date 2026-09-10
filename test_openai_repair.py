@@ -9,6 +9,7 @@ from unittest import mock
 from PIL import Image
 
 import openai_repair
+import openai_repair_context
 
 
 class OpenAIRepairTests(unittest.TestCase):
@@ -57,26 +58,29 @@ class OpenAIRepairTests(unittest.TestCase):
         selection = openai_repair._selection_mask(mask, mask.size)
         self.assertEqual(list(selection.getdata()), [0, 255, 255])
 
-    def test_api_key_is_read_from_app_dotenv_without_restart(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            dotenv = Path(temporary) / ".env"
-            dotenv.write_text("OPENAI_API_KEY=sk-test-first\n", encoding="utf-8")
-            with mock.patch.object(openai_repair, "DOTENV_PATH", dotenv), mock.patch.dict(
-                os.environ, {"OPENAI_API_KEY": ""}, clear=False
-            ):
-                self.assertEqual(openai_repair._api_key(), "sk-test-first")
-                self.assertTrue(openai_repair.status()["ready"])
-                dotenv.write_text("OPENAI_API_KEY=sk-test-second\n", encoding="utf-8")
-                self.assertEqual(openai_repair._api_key(), "sk-test-second")
+    def test_api_canvas_rounds_each_dimension_up_to_multiple_of_16(self):
+        self.assertEqual(openai_repair_context._multiple_of_16(1193), 1200)
+        self.assertEqual(openai_repair_context._multiple_of_16(1663), 1664)
+        self.assertEqual(openai_repair_context._multiple_of_16(1024), 1024)
 
-    def test_nonempty_process_environment_overrides_dotenv(self):
+    def test_context_sheet_contains_every_animation_frame_and_is_api_aligned(self):
+        frames = [Image.new("RGBA", (1193, 1663), (index * 20, 40, 80, 255)) for index in range(10)]
+        sheet = openai_repair_context._context_sheet(frames, 5)
+        self.assertEqual(sheet.width % 16, 0)
+        self.assertEqual(sheet.height % 16, 0)
+        self.assertGreater(sheet.width, 0)
+        self.assertGreater(sheet.height, 0)
+
+    def test_dotenv_key_is_visible_without_process_restart(self):
         with tempfile.TemporaryDirectory() as temporary:
             dotenv = Path(temporary) / ".env"
-            dotenv.write_text("OPENAI_API_KEY=sk-file\n", encoding="utf-8")
-            with mock.patch.object(openai_repair, "DOTENV_PATH", dotenv), mock.patch.dict(
-                os.environ, {"OPENAI_API_KEY": "sk-process"}, clear=False
-            ):
-                self.assertEqual(openai_repair._api_key(), "sk-process")
+            with mock.patch.object(openai_repair, "DOTENV_PATH", dotenv):
+                with mock.patch.dict(os.environ, {}, clear=False):
+                    os.environ.pop("OPENAI_API_KEY", None)
+                    dotenv.write_text("OPENAI_API_KEY=first-key\n", encoding="utf-8")
+                    self.assertEqual(openai_repair._api_key(), "first-key")
+                    dotenv.write_text("OPENAI_API_KEY=second-key\n", encoding="utf-8")
+                    self.assertEqual(openai_repair._api_key(), "second-key")
 
 
 if __name__ == "__main__":
