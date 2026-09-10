@@ -58,6 +58,7 @@ def install(advanced_pipeline_module):
     engine_progress.install(advanced_pipeline_module)
 
     import app as legacy
+    import analysis_upload_reuse
     import geometry_cache
     import job_control
     import live_timeline
@@ -66,6 +67,7 @@ def install(advanced_pipeline_module):
     import openai_repair_http
     import operation_pipeline
     import pipeline_settings
+    import repair_mode
     import temporal_repair
     import temporal_v2
     import timeline_pipeline
@@ -75,11 +77,11 @@ def install(advanced_pipeline_module):
     operation_pipeline.openai_repair = openai_repair_context
     openai_repair_http.openai_repair = openai_repair_context
 
-    # The ordered pipeline owns the temporal pass sequence. timeline_pipeline wraps
-    # each pass so a canonical current-animation timeline is published, while
-    # live_timeline merges in-progress worker output into the right slots and makes
-    # repair engines replace repaired slots instead of appending duplicate frame cards.
+    # The ordered pipeline owns the temporal pass sequence. Repair-mode dispatch must
+    # be installed before timeline_pipeline wraps the pass so a deferred manual pass
+    # is still published to the live timeline for inspection.
     operation_pipeline.install(temporal_v2)
+    repair_mode.install(operation_pipeline)
     looped_animation.install(temporal_v2)
     timeline_pipeline.install(operation_pipeline)
     pipeline_settings.install(temporal_v2)
@@ -88,6 +90,7 @@ def install(advanced_pipeline_module):
     # analysis result is stored outside its temporary snapshot, so Generate WebP can
     # reuse the exact matched/canvas-normalised frames when sources/settings match.
     geometry_cache.install(advanced_pipeline_module, temporal_v2)
+    analysis_upload_reuse.install_ui_patch()
     job_control.install(legacy, advanced_pipeline_module, temporal_v2)
     live_timeline.install(job_control)
     openai_repair_http.install()
