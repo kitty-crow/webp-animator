@@ -51,7 +51,6 @@
           .pipeline-row select { min-width: 0; width: 100%; }
           .pipeline-hint { margin-top: 8px; font-size: .76rem; opacity: .68; line-height: 1.35; }
           #temporalRepairControl { display: grid; gap: 7px; }
-          #openaiRepairStatus { min-height: 1.2em; }
           @media (max-width: 620px) {
             .pages-header__inner { grid-template-columns: 1fr auto; gap: .5rem; }
             .pages-nav { display: none; }
@@ -86,10 +85,8 @@
           <select id="temporalRepairEngine" aria-label="Frame repair engine">
             <option value="none">None</option>
             <option value="propainter">ProPainter</option>
-            <option value="openai">OpenAI repair</option>
           </select>
-          <span class="hint">A Repair pass acts on generated/interpolated frames already present at that point in the pipeline. ProPainter is local. OpenAI repair treats the deterministic frame as the edit target, uses its previous and next frames as immutable temporal references, and always restores the candidate's original alpha channel.</span>
-          <span class="hint" id="openaiRepairStatus">Checking OpenAI repair…</span>
+          <span class="hint">A Repair pass runs ProPainter on generated/interpolated frames already present at that point in the pipeline.</span>
         </label>
         <input id="temporalPipelineState" type="hidden" value="gap,repair,interpolate">
         <script>
@@ -143,7 +140,6 @@
 
             const control = document.getElementById("temporalRepairControl");
             const repairEngine = document.getElementById("temporalRepairEngine");
-            const repairStatus = document.getElementById("openaiRepairStatus");
             const form = document.getElementById("form");
             const target = document.getElementById("targetGaps");
             const grid = document.querySelector(".advanced-engine-grid");
@@ -156,23 +152,13 @@
             else form.appendChild(control);
             control.hidden = false;
 
-            const repairTokens = new Set(["repair:propainter", "repair:openai"]);
+            const repairTokens = new Set(["repair:propainter"]);
             const pipelinePrefix = "pipeline:";
             const partsOf = value => String(value || "").split(",").map(part => part.trim()).filter(Boolean);
             const savedRepairToken = partsOf(target?.value).find(part => repairTokens.has(part.toLowerCase()));
             const savedPipelineToken = partsOf(target?.value).find(part => part.toLowerCase().startsWith(pipelinePrefix));
             if (savedRepairToken) repairEngine.value = savedRepairToken.toLowerCase().split(":", 2)[1] || "none";
             if (savedPipelineToken) pipelineState.value = savedPipelineToken.slice(pipelinePrefix.length).replace(/[>|]/g, ",");
-
-            fetch("/openai-repair-status", { cache: "no-store" })
-              .then(response => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
-              .then(value => {
-                if (!repairStatus) return;
-                repairStatus.textContent = value.ready
-                  ? `OpenAI repair ready · ${value.model || "configured model"}`
-                  : "OpenAI repair needs OPENAI_API_KEY on the server.";
-              })
-              .catch(() => { if (repairStatus) repairStatus.textContent = "Could not check OpenAI repair status."; });
 
             const editor = document.createElement("section");
             editor.className = "pipeline-editor wide";
@@ -248,13 +234,13 @@
               const data = event.formData;
               const baseParts = partsOf(data.get("target_gaps")).filter(part => {
                 const lower = part.toLowerCase();
-                return !repairTokens.has(lower) && !lower.startsWith(pipelinePrefix);
+                return !lower.startsWith("repair:") && !lower.startsWith(pipelinePrefix);
               });
-              if (repairEngine.value !== "none") baseParts.push(`repair:${repairEngine.value}`);
+              if (repairEngine.value === "propainter") baseParts.push("repair:propainter");
               const active = [...list.querySelectorAll("select")]
                 .map(select => select.value)
                 .filter(operation => {
-                  if (operation === "repair") return repairEngine.value !== "none";
+                  if (operation === "repair") return repairEngine.value === "propainter";
                   if (operation === "gap") return generator?.value && generator.value !== "none";
                   if (operation === "interpolate") return interpolator?.value && interpolator.value !== "none";
                   return false;
@@ -266,4 +252,3 @@
         </script>
       </section>
       <script src="/live-run-ui.js" defer></script>
-      <script src="/openai-repair-ui.js" defer></script>
