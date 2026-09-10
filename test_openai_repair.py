@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from PIL import Image
 
@@ -52,6 +56,27 @@ class OpenAIRepairTests(unittest.TestCase):
         mask.putpixel((2, 0), (255, 48, 80, 220))
         selection = openai_repair._selection_mask(mask, mask.size)
         self.assertEqual(list(selection.getdata()), [0, 255, 255])
+
+    def test_api_key_is_read_from_app_dotenv_without_restart(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            dotenv = Path(temporary) / ".env"
+            dotenv.write_text("OPENAI_API_KEY=sk-test-first\n", encoding="utf-8")
+            with mock.patch.object(openai_repair, "DOTENV_PATH", dotenv), mock.patch.dict(
+                os.environ, {"OPENAI_API_KEY": ""}, clear=False
+            ):
+                self.assertEqual(openai_repair._api_key(), "sk-test-first")
+                self.assertTrue(openai_repair.status()["ready"])
+                dotenv.write_text("OPENAI_API_KEY=sk-test-second\n", encoding="utf-8")
+                self.assertEqual(openai_repair._api_key(), "sk-test-second")
+
+    def test_nonempty_process_environment_overrides_dotenv(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            dotenv = Path(temporary) / ".env"
+            dotenv.write_text("OPENAI_API_KEY=sk-file\n", encoding="utf-8")
+            with mock.patch.object(openai_repair, "DOTENV_PATH", dotenv), mock.patch.dict(
+                os.environ, {"OPENAI_API_KEY": "sk-process"}, clear=False
+            ):
+                self.assertEqual(openai_repair._api_key(), "sk-process")
 
 
 if __name__ == "__main__":
