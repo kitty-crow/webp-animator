@@ -50,6 +50,8 @@
           .pipeline-number { min-width: 4.4rem; font-size: .78rem; font-weight: 800; opacity: .72; }
           .pipeline-row select { min-width: 0; width: 100%; }
           .pipeline-hint { margin-top: 8px; font-size: .76rem; opacity: .68; line-height: 1.35; }
+          #temporalRepairControl { display: grid; gap: 7px; }
+          #openaiRepairStatus { min-height: 1.2em; }
           @media (max-width: 620px) {
             .pages-header__inner { grid-template-columns: 1fr auto; gap: .5rem; }
             .pages-nav { display: none; }
@@ -80,8 +82,14 @@
         </div>
 
         <label id="temporalRepairControl" class="wide" hidden>
-          <span><input id="temporalRepairAudit" type="checkbox"> Enable ProPainter repair passes</span>
-          <span class="hint">CUDA ProPainter temporal repair. Original source frames are never rewritten; a Repair pass audits generated/interpolated frames that exist at that point in the pipeline.</span>
+          Frame repair
+          <select id="temporalRepairEngine" aria-label="Frame repair engine">
+            <option value="none">None</option>
+            <option value="propainter">ProPainter</option>
+            <option value="openai">OpenAI repair</option>
+          </select>
+          <span class="hint">A Repair pass acts on generated/interpolated frames already present at that point in the pipeline. ProPainter is local. OpenAI repair treats the deterministic frame as the edit target, uses its previous and next frames as immutable temporal references, and always restores the candidate's original alpha channel.</span>
+          <span class="hint" id="openaiRepairStatus">Checking OpenAI repair…</span>
         </label>
         <input id="temporalPipelineState" type="hidden" value="gap,repair,interpolate">
         <script>
@@ -134,40 +142,52 @@
             }
 
             const control = document.getElementById("temporalRepairControl");
-            const checkbox = document.getElementById("temporalRepairAudit");
+            const repairEngine = document.getElementById("temporalRepairEngine");
+            const repairStatus = document.getElementById("openaiRepairStatus");
             const form = document.getElementById("form");
             const target = document.getElementById("targetGaps");
             const grid = document.querySelector(".advanced-engine-grid");
             const generator = document.getElementById("frameGenerator");
             const interpolator = document.getElementById("interpolator");
             const pipelineState = document.getElementById("temporalPipelineState");
-            if (!control || !checkbox || !form || !pipelineState) return;
+            if (!control || !repairEngine || !form || !pipelineState) return;
 
             if (grid) grid.appendChild(control);
             else form.appendChild(control);
             control.hidden = false;
 
-            const repairToken = "repair:propainter";
+            const repairTokens = new Set(["repair:propainter", "repair:openai"]);
             const pipelinePrefix = "pipeline:";
             const partsOf = value => String(value || "").split(",").map(part => part.trim()).filter(Boolean);
-            const oldRepair = partsOf(target?.value).some(part => part.toLowerCase() === repairToken);
+            const savedRepairToken = partsOf(target?.value).find(part => repairTokens.has(part.toLowerCase()));
             const savedPipelineToken = partsOf(target?.value).find(part => part.toLowerCase().startsWith(pipelinePrefix));
-            if (oldRepair) checkbox.checked = true;
+            if (savedRepairToken) repairEngine.value = savedRepairToken.toLowerCase().split(":", 2)[1] || "none";
             if (savedPipelineToken) pipelineState.value = savedPipelineToken.slice(pipelinePrefix.length).replace(/[>|]/g, ",");
+
+            fetch("/openai-repair-status", { cache: "no-store" })
+              .then(response => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
+              .then(value => {
+                if (!repairStatus) return;
+                repairStatus.textContent = value.ready
+                  ? `OpenAI repair ready · ${value.model || "configured model"}`
+                  : "OpenAI repair needs OPENAI_API_KEY on the server.";
+              })
+              .catch(() => { if (repairStatus) repairStatus.textContent = "Could not check OpenAI repair status."; });
 
             const editor = document.createElement("section");
             editor.className = "pipeline-editor wide";
-            editor.innerHTML = `<div class="pipeline-title"><strong>Temporal operation order</strong><button type="button" class="pipeline-add" id="pipelineAdd">+ Add pass</button></div><div class="pipeline-list" id="pipelineList"></div><div class="pipeline-hint">Default: Gap filling → ProPainter repair → Interpolation. Each pass consumes the output of the previous pass. Repeating a pass intentionally subdivides the current timeline again. A pass whose engine is None is skipped.</div>`;
+            editor.innerHTML = `<div class="pipeline-title"><strong>Temporal operation order</strong><button type="button" class="pipeline-add" id="pipelineAdd">+ Add pass</button></div><div class="pipeline-list" id="pipelineList"></div><div class="pipeline-hint">Up to four passes. Default: Gap filling → Frame repair → Interpolation. Each pass consumes the output of the previous pass, and repeated pass types are intentional.</div>`;
             if (grid) grid.appendChild(editor);
             else control.insertAdjacentElement("afterend", editor);
 
             const list = editor.querySelector("#pipelineList");
             const addButton = editor.querySelector("#pipelineAdd");
-            const choices = [["gap", "Gap filling"], ["repair", "ProPainter repair"], ["interpolate", "Interpolation"]];
+            const choices = [["gap", "Gap filling"], ["repair", "Frame repair"], ["interpolate", "Interpolation"]];
+            const MAX_PASSES = 4;
 
             function normalisePipeline(value) {
               const valid = new Set(choices.map(item => item[0]));
-              const parsed = partsOf(value).map(part => part.toLowerCase()).filter(part => valid.has(part));
+              const parsed = partsOf(value).map(part => part.toLowerCase()).filter(part => valid.has(part)).slice(0, MAX_PASSES);
               return parsed.length ? parsed : ["gap", "repair", "interpolate"];
             }
 
@@ -178,6 +198,7 @@
                 row.querySelector("[data-pipeline-up]").disabled = index === 0;
                 row.querySelector("[data-pipeline-down]").disabled = index === rows.length - 1;
               });
+              addButton.disabled = rows.length >= MAX_PASSES;
               pipelineState.value = rows.map(row => row.querySelector("select").value).join(",");
               pipelineState.dispatchEvent(new Event("change", { bubbles: true }));
             }
@@ -187,8 +208,7 @@
               row.className = "pipeline-row";
               const options = choices.map(([id, text]) => `<option value="${id}"${id === value ? " selected" : ""}>${text}</option>`).join("");
               row.innerHTML = `<span class="pipeline-number">Pass</span><select aria-label="Temporal pass type">${options}</select><button type="button" data-pipeline-up aria-label="Move pass up">↑</button><button type="button" data-pipeline-down aria-label="Move pass down">↓</button><button type="button" data-pipeline-remove aria-label="Remove pass">Remove</button>`;
-              const select = row.querySelector("select");
-              select.addEventListener("change", () => { if (select.value === "repair") checkbox.checked = true; syncState(); });
+              row.querySelector("select").addEventListener("change", syncState);
               row.querySelector("[data-pipeline-up]").addEventListener("click", () => { const previous = row.previousElementSibling; if (previous) list.insertBefore(row, previous); syncState(); });
               row.querySelector("[data-pipeline-down]").addEventListener("click", () => { const next = row.nextElementSibling; if (next) list.insertBefore(next, row); syncState(); });
               row.querySelector("[data-pipeline-remove]").addEventListener("click", () => { row.remove(); syncState(); });
@@ -201,7 +221,11 @@
               syncState();
             }
 
-            addButton.addEventListener("click", () => { list.appendChild(makeRow("gap")); syncState(); });
+            addButton.addEventListener("click", () => {
+              if (list.querySelectorAll(".pipeline-row").length >= MAX_PASSES) return;
+              list.appendChild(makeRow("gap"));
+              syncState();
+            });
             pipelineState.addEventListener("change", event => {
               if (event.target !== pipelineState || pipelineState.dataset.syncing === "1") return;
               const current = [...list.querySelectorAll("select")].map(select => select.value).join(",");
@@ -214,29 +238,32 @@
 
             target?.addEventListener("change", () => {
               const values = partsOf(target.value);
-              if (values.some(part => part.toLowerCase() === repairToken)) checkbox.checked = true;
-              const token = values.find(part => part.toLowerCase().startsWith(pipelinePrefix));
-              if (token) rebuild(token.slice(pipelinePrefix.length).replace(/[>|]/g, ","));
+              const token = values.find(part => repairTokens.has(part.toLowerCase()));
+              if (token) repairEngine.value = token.toLowerCase().split(":", 2)[1] || "none";
+              const pipelineToken = values.find(part => part.toLowerCase().startsWith(pipelinePrefix));
+              if (pipelineToken) rebuild(pipelineToken.slice(pipelinePrefix.length).replace(/[>|]/g, ","));
             });
 
             form.addEventListener("formdata", event => {
               const data = event.formData;
               const baseParts = partsOf(data.get("target_gaps")).filter(part => {
                 const lower = part.toLowerCase();
-                return lower !== repairToken && !lower.startsWith(pipelinePrefix);
+                return !repairTokens.has(lower) && !lower.startsWith(pipelinePrefix);
               });
+              if (repairEngine.value !== "none") baseParts.push(`repair:${repairEngine.value}`);
               const active = [...list.querySelectorAll("select")]
                 .map(select => select.value)
                 .filter(operation => {
-                  if (operation === "repair") return checkbox.checked;
+                  if (operation === "repair") return repairEngine.value !== "none";
                   if (operation === "gap") return generator?.value && generator.value !== "none";
                   if (operation === "interpolate") return interpolator?.value && interpolator.value !== "none";
                   return false;
                 });
-              if (active.length) baseParts.push(`${pipelinePrefix}${active.join(">")}`);
+              if (active.length) baseParts.push(`${pipelinePrefix}${active.slice(0, MAX_PASSES).join(">")}`);
               data.set("target_gaps", baseParts.join(","));
             });
           });
         </script>
       </section>
       <script src="/live-run-ui.js" defer></script>
+      <script src="/openai-repair-ui.js" defer></script>
