@@ -10,6 +10,9 @@ from PIL import Image
 
 import openai_repair
 
+ROOT = Path(__file__).resolve().parent
+UI_SCRIPT = ROOT / "openai_repair_ui.js"
+
 
 def _load_rgba(payload: bytes, label: str) -> Image.Image:
     try:
@@ -35,8 +38,20 @@ def install() -> None:
     original_post = legacy.Handler.do_POST
 
     def do_get(handler):
-        if urlparse(handler.path).path == "/openai-repair-status":
+        path = urlparse(handler.path).path
+        if path == "/openai-repair-status":
             handler.send_json(200, openai_repair.status())
+            return
+        if path == "/openai-repair-ui.js":
+            if not UI_SCRIPT.is_file():
+                handler.send_text(404, "OpenAI repair UI is missing.")
+                return
+            handler.send_bytes(
+                200,
+                UI_SCRIPT.read_bytes(),
+                "text/javascript; charset=utf-8",
+                {"Cache-Control": "no-store"},
+            )
             return
         return original_get(handler)
 
