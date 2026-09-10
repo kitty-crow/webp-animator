@@ -8,9 +8,11 @@ from PIL import Image
 
 import advanced_pipeline as base
 import job_control
+import openai_repair
 import temporal_repair
 
 _ALLOWED = {"gap", "repair", "interpolate"}
+_MAX_PASSES = 4
 _ALIASES = {
     "gap": "gap",
     "gap-fill": "gap",
@@ -46,14 +48,31 @@ def parse_pipeline(value) -> list[str]:
         token = _ALIASES.get(str(part).strip().lower())
         if token in _ALLOWED:
             result.append(token)
-    return result[:32]
+    return result[:_MAX_PASSES]
+
+
+def repair_engine(settings: dict | None) -> str:
+    settings = settings if isinstance(settings, dict) else {}
+    explicit = str(settings.get("repair_engine", "")).strip().lower()
+    if explicit in {"none", "propainter", "openai"}:
+        return explicit
+    tokens = {
+        part.strip().lower()
+        for part in str(settings.get("target_gaps", "")).replace(";", ",").split(",")
+        if part.strip()
+    }
+    if "repair:openai" in tokens:
+        return "openai"
+    if "repair:propainter" in tokens:
+        return "propainter"
+    return "none"
 
 
 def default_pipeline(settings: dict) -> list[str]:
     result: list[str] = []
     if str(settings.get("frame_generator", "none")).lower() in {"eden", "speed"}:
         result.append("gap")
-    if temporal_repair.repair_requested(settings):
+    if repair_engine(settings) != "none":
         result.append("repair")
     if str(settings.get("interpolator", "none")).lower() in {"rife", "amt"}:
         result.append("interpolate")
@@ -293,35 +312,97 @@ def _engine_pass(
     return diagnostics
 
 
+def _mask_paths_for_records(records: Sequence[base.FrameRecord], settings: dict) -> dict[int, str]:
+    configured = settings.get("repair_masks", {})
+    if not isinstance(configured, dict):
+        return {}
+    by_source: dict[int, str] = {}
+    for key, value in configured.items():
+        try:
+            source_index = int(key)
+        except (TypeError, ValueError):
+            continue
+        path = str(value or "").strip()
+        if path:
+            by_source[source_index] = path
+
+    result: dict[int, str] = {}
+    for index, record in enumerate(records):
+        for source_index in sorted(record.source_indices):
+            if source_index in by_source:
+                result[index] = by_source[source_index]
+                break
+    return result
+
+
 def _repair_pass(
     records: list[base.FrameRecord],
     stage_dir: Path,
     *,
+    settings: dict,
+    source_count: int,
     pass_number: int,
     pass_total: int,
     progress,
 ):
-    targets = [index for index, record in enumerate(records) if record.generated]
-    if not targets:
-        progress(1.0, f"Pass {pass_number}/{pass_total} · ProPainter skipped (no generated frames yet)")
+    engine = repair_engine(settings)
+    if engine == "none":
+        progress(1.0, f"Pass {pass_number}/{pass_total} · frame repair skipped (repair engine is None)")
         return None
 
-    progress(0.0, f"Pass {pass_number}/{pass_total} · starting ProPainter audit + repair")
-    repaired, stats = temporal_repair.repair_images(
-        [record.image for record in records],
-        targets,
-        stage_dir / "temporal-repair",
-        progress=lambda current, total: progress(
-            current / max(1, total),
-            f"Pass {pass_number}/{pass_total} · ProPainter temporal repair · step {current}/{total}",
-        ),
+    masks = _mask_paths_for_records(records, settings) if engine == "openai" else {}
+    targets = sorted(
+        {
+            *[index for index, record in enumerate(records) if record.generated],
+            *masks.keys(),
+        }
     )
-    for index in targets:
+    if not targets:
+        progress(1.0, f"Pass {pass_number}/{pass_total} · {engine.upper()} repair skipped (no target frames yet)")
+        return None
+
+    label = "OpenAI" if engine == "openai" else "ProPainter"
+    progress(0.0, f"Pass {pass_number}/{pass_total} · starting {label} frame repair")
+    callback = lambda current, total: progress(
+        current / max(1, total),
+        f"Pass {pass_number}/{pass_total} · {label} frame repair · step {current}/{total}",
+    )
+
+    if engine == "openai":
+        loop = any(
+            record.generated
+            and record.between_source_frames == (max(0, source_count - 1), 0)
+            for record in records
+        )
+        repaired, stats = openai_repair.repair_images(
+            [record.image for record in records],
+            targets,
+            stage_dir / "temporal-repair",
+            masks=masks,
+            loop=loop,
+            progress=callback,
+            model=str(settings.get("openai_repair_model", "") or openai_repair.DEFAULT_MODEL),
+            quality=str(settings.get("openai_repair_quality", "") or openai_repair.DEFAULT_QUALITY),
+        )
+        suffix = "openai-repair"
+    else:
+        repaired, stats = temporal_repair.repair_images(
+            [record.image for record in records],
+            targets,
+            stage_dir / "temporal-repair",
+            progress=callback,
+        )
+        suffix = "propainter"
+
+    repaired_indexes = set(targets) - set(int(index) for index in stats.get("skipped", []) or [])
+    for index in repaired_indexes:
+        if index < 0 or index >= len(records):
+            continue
         records[index].image = repaired[index]
-        prior = str(records[index].engine or "generated")
-        if "propainter" not in prior.lower():
-            records[index].engine = f"{prior}+propainter"
-    progress(1.0, f"Pass {pass_number}/{pass_total} · ProPainter audit + repair complete")
+        prior = str(records[index].engine or ("source" if records[index].source_indices else "generated"))
+        if suffix not in prior.lower():
+            records[index].engine = f"{prior}+{suffix}"
+    progress(1.0, f"Pass {pass_number}/{pass_total} · {label} frame repair complete")
     return stats
 
 
@@ -404,6 +485,8 @@ def install(temporal_v2):
                     stats = _repair_pass(
                         records,
                         pass_dir,
+                        settings=settings,
+                        source_count=source_count,
                         pass_number=index,
                         pass_total=pass_total,
                         progress=pass_progress,
@@ -445,7 +528,8 @@ def install(temporal_v2):
                 + (" → ".join(pipeline) if pipeline else "none")
             )
             if repair_stats:
-                message += f"; ProPainter repair pass{'es' if len(repair_stats) != 1 else ''}: {len(repair_stats)}"
+                engines = ", ".join(str(item.get("engine", "repair")) for item in repair_stats)
+                message += f"; repair pass{'es' if len(repair_stats) != 1 else ''}: {engines}"
             if limit_notes:
                 message += f"; {len(limit_notes)} adaptive fill(s) reached the safety ceiling"
 
