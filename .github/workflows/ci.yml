@@ -29,7 +29,7 @@ jobs:
             webp_fast.py worker_common.py temporal_timing.py engine_progress.py looped_animation.py \
             job_control.py live_timeline.py operation_pipeline.py pipeline_live.py pipeline_settings.py \
             temporal_repair.py propainter_repair_worker.py timeline_pipeline.py \
-            openai_repair.py openai_repair_http.py \
+            openai_repair.py openai_repair_context.py openai_repair_http.py \
             setup_rife.py setup_engine_common.py setup_acceleration.py setup_amt.py setup_eden.py setup_speed.py setup_propainter.py
           node --check advanced_ui.js
           node --check live_run_ui.js
