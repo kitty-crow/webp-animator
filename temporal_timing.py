@@ -58,6 +58,7 @@ def install(advanced_pipeline_module):
     engine_progress.install(advanced_pipeline_module)
 
     import app as legacy
+    import geometry_cache
     import job_control
     import live_timeline
     import looped_animation
@@ -83,6 +84,10 @@ def install(advanced_pipeline_module):
     timeline_pipeline.install(operation_pipeline)
     pipeline_settings.install(temporal_v2)
     temporal_repair.install(temporal_v2)
+    # Analysis and render both enter _normalise_geometry through this wrapper. The
+    # analysis result is stored outside its temporary snapshot, so Generate WebP can
+    # reuse the exact matched/canvas-normalised frames when sources/settings match.
+    geometry_cache.install(advanced_pipeline_module, temporal_v2)
     job_control.install(legacy, advanced_pipeline_module, temporal_v2)
     live_timeline.install(job_control)
     openai_repair_http.install()
