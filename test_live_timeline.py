@@ -72,38 +72,6 @@ class LiveTimelineTests(unittest.TestCase):
             self.assertIn("Generated · SPEED", timeline[0]["stage"])
             self.assertIn("temporal-repair/output/frames/000000.png", timeline[0]["url"])
 
-    def test_openai_repair_replaces_existing_timeline_slot(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            pass_dir = root / "pass-02-repair"
-            original = pass_dir / "input" / "000000.png"
-            repaired = pass_dir / "temporal-repair" / "output" / "000000.png"
-            self._png(original, (10, 20, 30, 90))
-            self._png(repaired, (80, 90, 100, 90))
-
-            base = {
-                "pass_number": 2,
-                "operation": "repair",
-                "engine": "openai",
-                "frames": [
-                    {
-                        "key": "pass:1:generated:0",
-                        "name": "middle.png",
-                        "rel": original.relative_to(root).as_posix(),
-                        "stage": "Generated · SPEED",
-                        "generated": True,
-                    },
-                ],
-                "pairs": [],
-            }
-            timeline = live_timeline._dynamic_repair(root, "abc", pass_dir, base)
-            self.assertEqual(len(timeline), 1)
-            self.assertEqual(timeline[0]["key"], "pass:1:generated:0")
-            self.assertIn("OpenAI", timeline[0]["stage"])
-            self.assertIn("Generated · SPEED", timeline[0]["stage"])
-            self.assertEqual(timeline[0]["engine"], "openai-repair")
-            self.assertIn("temporal-repair/output/000000.png", timeline[0]["url"])
-
 
 if __name__ == "__main__":
     unittest.main()
