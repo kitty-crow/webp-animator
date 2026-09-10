@@ -13,10 +13,77 @@ from typing import Mapping, Sequence
 
 from PIL import Image
 
-DEFAULT_MODEL = os.environ.get("OPENAI_REPAIR_MODEL", "gpt-image-2")
-DEFAULT_QUALITY = os.environ.get("OPENAI_REPAIR_QUALITY", "medium")
-DEFAULT_BASE = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1").rstrip("/")
-DEFAULT_TIMEOUT = max(30.0, float(os.environ.get("OPENAI_REPAIR_TIMEOUT", "240")))
+ROOT = Path(__file__).resolve().parent
+DOTENV_PATH = ROOT / ".env"
+
+
+def _dotenv_values() -> dict[str, str]:
+    """Read the app-local .env without requiring python-dotenv.
+
+    This is intentionally evaluated on demand so adding/changing OPENAI_API_KEY in
+    .env is visible to an already-running WebP Animator process. Real process
+    environment variables still take precedence when they contain a value.
+    """
+    try:
+        text = DOTENV_PATH.read_text(encoding="utf-8-sig")
+    except (FileNotFoundError, OSError, UnicodeError):
+        return {}
+
+    values: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.lower().startswith("export "):
+            line = line[7:].lstrip()
+        if "=" not in line:
+            continue
+        name, raw_value = line.split("=", 1)
+        name = name.strip()
+        if not name or not (name[0].isalpha() or name[0] == "_") or not all(
+            char.isalnum() or char == "_" for char in name
+        ):
+            continue
+
+        value = raw_value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        else:
+            # Support the common KEY=value # comment form without eating # inside
+            # tokens/URLs that are not preceded by whitespace.
+            marker = value.find(" #")
+            if marker >= 0:
+                value = value[:marker].rstrip()
+        values[name] = value
+    return values
+
+
+def _setting(name: str, default: str = "") -> str:
+    value = str(os.environ.get(name, "")).strip()
+    if value:
+        return value
+    return str(_dotenv_values().get(name, default)).strip()
+
+
+def _api_key() -> str:
+    return _setting("OPENAI_API_KEY", "")
+
+
+def _base() -> str:
+    return _setting("OPENAI_API_BASE", "https://api.openai.com/v1").rstrip("/")
+
+
+def _timeout() -> float:
+    try:
+        return max(30.0, float(_setting("OPENAI_REPAIR_TIMEOUT", "240")))
+    except (TypeError, ValueError):
+        return 240.0
+
+
+DEFAULT_MODEL = _setting("OPENAI_REPAIR_MODEL", "gpt-image-2")
+DEFAULT_QUALITY = _setting("OPENAI_REPAIR_QUALITY", "medium")
+DEFAULT_BASE = _base()
+DEFAULT_TIMEOUT = _timeout()
 
 REPAIR_PROMPT = """You are repairing exactly one already-generated animation frame.
 
@@ -33,12 +100,12 @@ The application preserves transparency and may provide an edit mask. When a mask
 
 
 def status() -> dict:
-    key = str(os.environ.get("OPENAI_API_KEY", "")).strip()
+    key = _api_key()
     return {
         "ready": bool(key),
-        "model": DEFAULT_MODEL,
-        "quality": DEFAULT_QUALITY,
-        "base": DEFAULT_BASE,
+        "model": _setting("OPENAI_REPAIR_MODEL", DEFAULT_MODEL),
+        "quality": _setting("OPENAI_REPAIR_QUALITY", DEFAULT_QUALITY),
+        "base": _base(),
     }
 
 
@@ -134,9 +201,9 @@ def _image_edit(
     quality: str,
     prompt: str,
 ) -> tuple[Image.Image, dict]:
-    key = str(os.environ.get("OPENAI_API_KEY", "")).strip()
+    key = _api_key()
     if not key:
-        raise RuntimeError("OpenAI repair is selected but OPENAI_API_KEY is not configured on the server.")
+        raise RuntimeError("OpenAI repair is selected but OPENAI_API_KEY is not configured on the server or in the app .env file.")
 
     candidate = candidate.convert("RGBA")
     size = candidate.size
@@ -164,7 +231,7 @@ def _image_edit(
 
     body, content_type = _multipart(fields, files)
     request = urllib.request.Request(
-        f"{DEFAULT_BASE}/images/edits",
+        f"{_base()}/images/edits",
         data=body,
         headers={
             "Authorization": f"Bearer {key}",
@@ -177,7 +244,7 @@ def _image_edit(
     last_error: Exception | None = None
     for attempt in range(3):
         try:
-            with urllib.request.urlopen(request, timeout=DEFAULT_TIMEOUT) as response:
+            with urllib.request.urlopen(request, timeout=_timeout()) as response:
                 value = json.loads(response.read().decode("utf-8"))
             break
         except urllib.error.HTTPError as exc:
@@ -199,7 +266,7 @@ def _image_edit(
     if encoded:
         payload = base64.b64decode(encoded)
     elif item.get("url"):
-        with urllib.request.urlopen(str(item["url"]), timeout=DEFAULT_TIMEOUT) as response:
+        with urllib.request.urlopen(str(item["url"]), timeout=_timeout()) as response:
             payload = response.read()
     else:
         raise RuntimeError("OpenAI image repair returned no image data.")
@@ -245,8 +312,8 @@ def repair_images(
     frames = [image.convert("RGBA").copy() for image in images]
     targets = sorted({int(index) for index in target_indexes if 0 <= int(index) < len(frames)})
     masks = dict(masks or {})
-    model = str(model or DEFAULT_MODEL)
-    quality = str(quality or DEFAULT_QUALITY).lower()
+    model = str(model or _setting("OPENAI_REPAIR_MODEL", DEFAULT_MODEL))
+    quality = str(quality or _setting("OPENAI_REPAIR_QUALITY", DEFAULT_QUALITY)).lower()
     if quality not in {"low", "medium", "high"}:
         quality = "medium"
     prompt = str(prompt or REPAIR_PROMPT).strip()
