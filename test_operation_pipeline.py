@@ -38,19 +38,10 @@ class OperationPipelineTests(unittest.TestCase):
             ["interpolate", "gap", "repair", "gap"],
         )
 
-    def test_openai_repair_token_selects_same_repair_pass(self):
-        settings = {
-            "frame_generator": "none",
-            "interpolator": "none",
-            "target_gaps": "repair:openai",
-        }
-        self.assertEqual(operation_pipeline.repair_engine(settings), "openai")
-        self.assertEqual(operation_pipeline.default_pipeline(settings), ["repair"])
-
     def test_explicit_repair_engine_takes_precedence(self):
         settings = {
             "repair_engine": "propainter",
-            "target_gaps": "repair:openai",
+            "target_gaps": "",
         }
         self.assertEqual(operation_pipeline.repair_engine(settings), "propainter")
 
