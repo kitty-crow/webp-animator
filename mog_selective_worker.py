@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import shutil
+
 import mog_selective_worker_v2 as implementation
 
 
@@ -17,6 +19,32 @@ def _load_checkpoint_low_ram(torch, model, checkpoint):
 
 
 implementation._load_checkpoint_mmap = _load_checkpoint_low_ram
+
+
+# MoG is inconsistent about this filename: the published folder contains
+# ours_t.pkl, older integration paths refer to ours_t.ckpt, and upstream Trainer.py
+# loads ours_t.pkl directly. Keep both names present even when MOG_FLOW_CHECKPOINT
+# points at a custom copy so model construction cannot fail on the alternate name.
+def _ensure_flow_checkpoint(source, supplied):
+    checkpoint_dir = source / "emavfi" / "ckpt"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    pkl = checkpoint_dir / "ours_t.pkl"
+    ckpt = checkpoint_dir / "ours_t.ckpt"
+    supplied = supplied.resolve()
+
+    for target in (pkl, ckpt):
+        try:
+            same = supplied == target.resolve()
+        except OSError:
+            same = False
+        if same:
+            continue
+        if not target.is_file() or target.stat().st_size != supplied.stat().st_size:
+            shutil.copy2(supplied, target)
+    return ckpt
+
+
+implementation._ensure_flow_checkpoint = _ensure_flow_checkpoint
 
 
 # Upstream EMA-VFI calls torch.load() without map_location while constructing its
