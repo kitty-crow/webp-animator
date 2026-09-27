@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import gc
 import os
 import shutil
 from pathlib import Path
@@ -90,15 +91,9 @@ def choose_offload_mode(model, device, *, env_var: str) -> tuple[str, dict[str, 
     gpu_bytes = int(torch.cuda.get_device_properties(device).total_memory)
     ram_bytes = available_ram_bytes()
 
-    # Full residency needs room for more than weights: kernels, allocator bookkeeping,
-    # endpoint tensors and diffusion activations also consume VRAM. Keep a conservative
-    # margin and use streaming offload when the model would crowd the card.
     gpu_margin = max(768 * 1024**2, int(weight_bytes * 0.25))
     gpu_resident_ok = weight_bytes + gpu_margin <= gpu_bytes
 
-    # CPU offload retains one host-side state dict. Leave enough headroom for Python,
-    # decoded frames, the motion network and OS cache. If that is not available, use
-    # Accelerate's memory-mapped disk offload instead.
     ram_margin = max(2 * _GIB, int(weight_bytes * 0.35))
     cpu_offload_ok = ram_bytes <= 0 or weight_bytes + ram_margin <= ram_bytes
 
@@ -118,7 +113,49 @@ def choose_offload_mode(model, device, *, env_var: str) -> tuple[str, dict[str, 
         "ram_available": ram_bytes,
         "gpu_resident_ok": gpu_resident_ok,
         "cpu_offload_ok": cpu_offload_ok,
+        "requested": requested,
     }
+
+
+def _sync_execution_device(model, device) -> None:
+    """Keep Lightning's model.device on CUDA while Accelerate stores weights elsewhere."""
+    try:
+        modules = model.modules()
+    except Exception:
+        modules = (model,)
+    for module in modules:
+        if hasattr(module, "_device"):
+            try:
+                module._device = device
+            except Exception:
+                pass
+
+
+def _disk_offload(model, device, *, source: Path, checkpoint: Path, namespace: str, stats: dict[str, Any]):
+    from accelerate import disk_offload
+
+    explicit = os.environ.get(f"{namespace.upper()}_OFFLOAD_DIR", "").strip()
+    offload_root = (
+        Path(explicit).expanduser().resolve()
+        if explicit
+        else source / "_webp_offload" / checkpoint.stem
+    )
+    offload_root.mkdir(parents=True, exist_ok=True)
+    free = shutil.disk_usage(offload_root).free
+    required = max(int(stats["weights"] * 1.15), stats["weights"] + 512 * 1024**2)
+    if free < required:
+        raise RuntimeError(
+            f"{namespace} needs about {required / _GIB:.1f} GB free for disk offload, "
+            f"but only {free / _GIB:.1f} GB is available at {offload_root}."
+        )
+    model = disk_offload(
+        model,
+        offload_dir=offload_root,
+        execution_device=device,
+        offload_buffers=True,
+    )
+    setattr(model, "_webp_offload_dir", str(offload_root))
+    return model
 
 
 def apply_model_offload(
@@ -130,12 +167,12 @@ def apply_model_offload(
     env_var: str,
     namespace: str,
 ):
-    """Place a model on GPU, RAM-stream it, or memory-map it from disk.
+    """Place a model on GPU, stream it from RAM, or memory-map it from disk.
 
     CPU/disk modes use Accelerate hooks: each submodule's parameters are copied to the
     execution GPU only for the forward that needs them and are removed afterwards.
-    Disk mode stores the host weights as memory-mapped files so the steady-state model
-    does not need to fit in physical RAM either. The largest individual layer plus its
+    Disk mode stores the host weights as memory-mapped files so steady-state weights
+    need not fit in physical RAM either. The largest individual layer plus its
     activations still has to fit on the GPU.
     """
     import torch
@@ -149,7 +186,8 @@ def apply_model_offload(
         model = model.to(device)
     else:
         try:
-            from accelerate import cpu_offload, disk_offload
+            from accelerate import cpu_offload
+            from accelerate import disk_offload  # noqa: F401 - validates both APIs exist
         except Exception as exc:
             raise RuntimeError(
                 f"{namespace} selected {mode} offload but Hugging Face Accelerate is missing. "
@@ -157,34 +195,42 @@ def apply_model_offload(
             ) from exc
 
         if mode == "cpu":
-            model = cpu_offload(
-                model,
-                execution_device=device,
-                offload_buffers=True,
-            )
-        else:
-            explicit = os.environ.get(f"{namespace.upper()}_OFFLOAD_DIR", "").strip()
-            offload_root = (
-                Path(explicit).expanduser().resolve()
-                if explicit
-                else source / "_webp_offload" / checkpoint.stem
-            )
-            offload_root.mkdir(parents=True, exist_ok=True)
-            free = shutil.disk_usage(offload_root).free
-            required = max(int(stats["weights"] * 1.15), stats["weights"] + 512 * 1024**2)
-            if free < required:
-                raise RuntimeError(
-                    f"{namespace} needs about {required / _GIB:.1f} GB free for disk offload, "
-                    f"but only {free / _GIB:.1f} GB is available at {offload_root}."
+            try:
+                model = cpu_offload(
+                    model,
+                    execution_device=device,
+                    offload_buffers=True,
                 )
-            model = disk_offload(
+            except (MemoryError, OSError, RuntimeError) as exc:
+                # In auto mode RAM was only an estimate. If host allocation still
+                # fails, fall through to memory-mapped disk rather than aborting.
+                if stats.get("requested") != "auto":
+                    raise
+                print(
+                    f"{namespace.upper()}_OFFLOAD RAM path failed ({exc}); falling back to disk",
+                    flush=True,
+                )
+                gc.collect()
+                model = _disk_offload(
+                    model,
+                    device,
+                    source=source,
+                    checkpoint=checkpoint,
+                    namespace=namespace,
+                    stats=stats,
+                )
+                mode = "disk"
+        else:
+            model = _disk_offload(
                 model,
-                offload_dir=offload_root,
-                execution_device=device,
-                offload_buffers=True,
+                device,
+                source=source,
+                checkpoint=checkpoint,
+                namespace=namespace,
+                stats=stats,
             )
-            setattr(model, "_webp_offload_dir", str(offload_root))
 
+    _sync_execution_device(model, device)
     setattr(model, "_webp_execution_device", device)
     setattr(model, "_webp_offload_mode", mode)
     setattr(model, "_webp_model_weight_bytes", int(stats["weights"]))
