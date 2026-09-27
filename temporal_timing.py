@@ -1,11 +1,33 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 from PIL import Image
 
 import engine_progress
 
 
+def _publish_running_app_alias() -> None:
+    """Make patch modules see the direct `python app_all.py` process as app_all.
+
+    Several feature modules were originally written for `import app_all` and looked
+    only in sys.modules["app_all"]. Direct script execution registers the same module
+    as __main__, which made UI/runtime patches silently disappear depending on how the
+    server was launched. Publish one canonical alias before installing any patches so
+    every module observes the same live application object and no duplicate import is
+    created.
+    """
+    if sys.modules.get("app_all") is not None:
+        return
+    main = sys.modules.get("__main__")
+    filename = Path(str(getattr(main, "__file__", ""))).name.lower() if main else ""
+    if filename == "app_all.py":
+        sys.modules["app_all"] = main
+
+
 def install(advanced_pipeline_module):
+    _publish_running_app_alias()
     FrameRecord = advanced_pipeline_module.FrameRecord
 
     def insert_interpolator_results(records, task_specs, results, engine):
@@ -89,6 +111,11 @@ def install(advanced_pipeline_module):
     geometry_cache.install(advanced_pipeline_module, temporal_v2)
     analysis_upload_reuse.install_ui_patch()
     tooncrafter_vfi.install_backend()
+
+    # The engine catalogue is now the sole browser-side engine-option source. The
+    # original generative_vfi UI patch manually appended ResShift/MoG options and can
+    # race the catalogue population, so keep only its backend bridge behaviour.
+    generative_vfi._append_ui_patch = lambda: None
     generative_vfi.install(legacy, temporal_v2)
     generative_pipeline_bridge.install(temporal_v2)
     generative_vfi_restore.install_ui_patch()
