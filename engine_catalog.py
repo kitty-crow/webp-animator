@@ -44,6 +44,10 @@ ENGINE_REGISTRY: tuple[dict[str, Any], ...] = (
         "hint": "Motion-aware generative interpolation tuned for animation.",
         "generative": True,
         "requires_cuda": True,
+        # The FP16 diffusion model itself cannot be placed on a 4 GB card. This is
+        # independent of render resolution, so do not offer a control that can only
+        # fail later during model.to(cuda).
+        "minimum_vram_gb": 5.0,
         "order": 40,
         "low_vram_warning_gb": 6,
     },
@@ -54,6 +58,7 @@ ENGINE_REGISTRY: tuple[dict[str, Any], ...] = (
         "hint": "Motion-aware generative interpolation tuned for photographic and real-world footage.",
         "generative": True,
         "requires_cuda": True,
+        "minimum_vram_gb": 5.0,
         "order": 50,
         "low_vram_warning_gb": 6,
     },
@@ -64,6 +69,9 @@ ENGINE_REGISTRY: tuple[dict[str, Any], ...] = (
         "hint": "Generative cartoon interpolation that creates a transition from the two endpoint frames and selects the requested in-betweens.",
         "generative": True,
         "requires_cuda": True,
+        # ToonCrafter's diffusion core has the same class of placement floor as MoG.
+        # Reduced output resolution helps activations, not the resident model weights.
+        "minimum_vram_gb": 5.0,
         "order": 60,
         "low_vram_warning_gb": 6,
     },
@@ -142,7 +150,8 @@ def _cuda_runtime_probe(python_path: object) -> dict[str, Any]:
             "print(torch.__version__); "
             "print(torch.version.cuda or ''); "
             "print('1' if torch.cuda.is_available() else '0'); "
-            "print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else '')"
+            "print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else ''); "
+            "print(torch.cuda.get_device_properties(0).total_memory if torch.cuda.is_available() else 0)"
         ),
     ]
     try:
@@ -155,17 +164,22 @@ def _cuda_runtime_probe(python_path: object) -> dict[str, Any]:
         )
         lines = [line.strip() for line in result.stdout.splitlines()]
         ready = result.returncode == 0 and len(lines) >= 3 and lines[2] == "1"
+        try:
+            total_vram = int(lines[4]) if len(lines) > 4 and lines[4] else 0
+        except ValueError:
+            total_vram = 0
         probe = {
             "ready": ready,
             "torch": lines[0] if lines else None,
             "cuda_runtime": lines[1] if len(lines) > 1 else None,
             "device": lines[3] if len(lines) > 3 and lines[3] else None,
+            "total_vram": total_vram,
         }
         if not ready:
             details = (result.stderr or result.stdout or "PyTorch reports CUDA unavailable.").strip()
             probe["error"] = details[-1200:]
     except Exception as exc:
-        probe = {"ready": False, "error": str(exc)}
+        probe = {"ready": False, "error": str(exc), "total_vram": 0}
 
     with _RUNTIME_LOCK:
         _RUNTIME_CACHE[path] = dict(probe)
@@ -201,6 +215,17 @@ def catalog_from_status(state: dict[str, Any]) -> list[dict[str, Any]]:
             if not bool(probe.get("ready", False)):
                 entry["ready"] = False
                 entry["error"] = str(probe.get("error") or "CUDA runtime is not usable in this engine environment.")
+            else:
+                minimum_gb = float(definition.get("minimum_vram_gb", 0) or 0)
+                total_vram = int(probe.get("total_vram", 0) or 0)
+                if minimum_gb > 0 and total_vram > 0 and total_vram < minimum_gb * 1024**3:
+                    actual_gb = total_vram / 1024**3
+                    entry["ready"] = False
+                    entry["error"] = (
+                        f"{entry.get('label', engine_id)} needs more VRAM for model placement "
+                        f"than this GPU provides ({actual_gb:.1f} GB detected; "
+                        f"{minimum_gb:.1f} GB minimum configured)."
+                    )
 
         if runtime.get("setup"):
             entry["setup"] = str(runtime["setup"])
