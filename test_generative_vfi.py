@@ -5,6 +5,7 @@ import unittest
 
 import generative_vfi
 import generative_models_ui
+import timeline_pipeline
 import tooncrafter_vfi
 
 
@@ -17,6 +18,12 @@ class FakeLegacy:
 
     def parse_multipart(self, _content_type, _body):
         return dict(self._fields), [("frames", "one.png", b"x")]
+
+
+class FakeRecord:
+    def __init__(self, engine: str, generated: bool = True):
+        self.engine = engine
+        self.generated = generated
 
 
 class GenerativeVFITests(unittest.TestCase):
@@ -59,6 +66,21 @@ class GenerativeVFITests(unittest.TestCase):
     def test_ui_patch_contains_all_advanced_models(self):
         for value in ("resshift", "mog_ani", "mog_real", "tooncrafter"):
             self.assertIn(value, generative_models_ui.UI_PATCH)
+
+    def test_timeline_recovers_real_engine_from_compatibility_marker(self):
+        for engine in ("resshift", "mog_ani", "mog_real", "tooncrafter"):
+            marker = generative_vfi.MARKERS[engine]
+            settings = {"interpolator": "amt", "target_gaps": f"{marker},2"}
+            self.assertEqual(
+                timeline_pipeline._selected_engine(settings, "interpolate"),
+                engine,
+            )
+
+    def test_generative_vfi_frames_are_labelled_as_interpolated(self):
+        for engine in ("resshift", "mog_ani", "mog_real", "tooncrafter"):
+            stage = timeline_pipeline._stage_for(FakeRecord(engine))
+            self.assertTrue(stage.startswith("Interpolated · "), stage)
+            self.assertNotIn("AMT", stage)
 
     def test_visible_device_tokens_honour_parent_mask(self):
         previous = os.environ.get("CUDA_VISIBLE_DEVICES")
