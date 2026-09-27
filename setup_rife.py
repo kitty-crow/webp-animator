@@ -49,6 +49,18 @@ def choose_python():
     raise RuntimeError("Could not find a Python interpreter for the RIFE environment.")
 
 
+def venv_python() -> Path:
+    candidates = (
+        VENV_DIR / "Scripts" / "python.exe",
+        VENV_DIR / "Scripts" / "python",
+        VENV_DIR / "bin" / "python",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return candidates[0] if os.name == "nt" else candidates[-1]
+
+
 def install_repo():
     RIFE_DIR.parent.mkdir(parents=True, exist_ok=True)
     if (RIFE_DIR / ".git").is_dir():
@@ -71,10 +83,13 @@ def create_environment(bootstrap_python: str):
             "  RIFE_BOOTSTRAP_PYTHON=python3.11 python setup_rife.py"
         )
 
-    if not (VENV_DIR / "bin" / "python").is_file():
+    python = venv_python()
+    if not python.is_file():
         run([bootstrap_python, "-m", "venv", str(VENV_DIR)])
+        python = venv_python()
+    if not python.is_file():
+        raise RuntimeError(f"RIFE virtual environment was created but Python was not found under {VENV_DIR}")
 
-    python = VENV_DIR / "bin" / "python"
     run([python, "-m", "pip", "install", "--upgrade", "pip", "wheel", "setuptools"])
     run([
         python, "-m", "pip", "install",
@@ -129,7 +144,7 @@ def main():
     print(f"RIFE Python: {rife_python}")
     print(f"RIFE source: {RIFE_DIR}")
     print(f"RIFE model:  {MODEL_DIR}")
-    print("Restart app.py if it is already running.")
+    print("Restart app_all.py if it is already running.")
 
 
 if __name__ == "__main__":
