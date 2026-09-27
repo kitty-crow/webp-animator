@@ -84,6 +84,7 @@ def install(advanced_pipeline_module):
     import engine_catalog
     import generative_models_ui
     import generative_pipeline_bridge
+    import generative_process_control
     import generative_vfi
     import generative_vfi_restore
     import geometry_cache
@@ -121,4 +122,5 @@ def install(advanced_pipeline_module):
     generative_vfi_restore.install_ui_patch()
     generative_models_ui.install_ui_patch()
     job_control.install(legacy, advanced_pipeline_module, temporal_v2)
+    generative_process_control.install(generative_vfi)
     live_timeline.install(job_control)
