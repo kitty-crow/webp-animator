@@ -7,13 +7,31 @@ import sys
 import tempfile
 from pathlib import Path
 
-from setup_engine_common import ensure_repo, ensure_venv, run
+from setup_engine_common import (
+    choose_torch_cuda_variant,
+    ensure_repo,
+    ensure_venv,
+    installed_torch_cuda,
+    run,
+    validate_cuda_runtime,
+)
 
 ROOT = Path(__file__).resolve().parent
 SOURCE = ROOT / "third_party" / "ToonCrafter"
 VENV = ROOT / ".tooncrafter-venv"
 REPOSITORY = "https://github.com/Doubiiu/ToonCrafter.git"
 MODEL_REPOSITORY = "Doubiiu/ToonCrafter"
+
+CUDA_VARIANTS = {
+    "cu118": {
+        "index": "https://download.pytorch.org/whl/cu118",
+        "runtime": "11.8",
+    },
+    "cu121": {
+        "index": "https://download.pytorch.org/whl/cu121",
+        "runtime": "12.1",
+    },
+}
 
 
 def choose_python() -> str:
@@ -31,26 +49,10 @@ def choose_python() -> str:
     raise RuntimeError("Could not find Python 3.8-3.10 for the ToonCrafter environment.")
 
 
-def install_requirements(python: Path) -> None:
-    run([
-        python,
-        "-m",
-        "pip",
-        "install",
-        "torch==2.1.0+cu121",
-        "torchvision==0.16.0+cu121",
-        "--index-url",
-        os.environ.get("TOONCRAFTER_TORCH_INDEX", "https://download.pytorch.org/whl/cu121"),
-    ])
-    # xformers is distributed on PyPI; using the PyTorch wheel index here makes pip
-    # report a false "no matching distribution" on Windows.
-    run([python, "-m", "pip", "install", "xformers==0.0.22.post7"])
-
-    # Keep the upstream inference dependencies while avoiding packages the WebP
-    # worker never imports. Torch/xformers are pinned above so their CUDA wheels stay
-    # internally consistent on Windows.
+def _filtered_requirements() -> Path:
     source_requirements = (SOURCE / "requirements.txt").read_text(encoding="utf-8")
-    kept = []
+    destination = VENV / "tooncrafter-upstream-requirements.txt"
+    kept: list[str] = []
     for raw in source_requirements.splitlines():
         line = raw.strip()
         lower = line.lower()
@@ -61,13 +63,35 @@ def install_requirements(python: Path) -> None:
         if lower.startswith("gradio") or lower.startswith("moviepy") or lower == "av":
             continue
         kept.append(line)
+    destination.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    return destination
 
-    with tempfile.TemporaryDirectory(prefix="tooncrafter_requirements_") as temp:
-        requirements = Path(temp) / "requirements-inference.txt"
-        requirements.write_text("\n".join(kept) + "\n", encoding="utf-8")
-        run([python, "-m", "pip", "install", "-r", requirements])
 
+def install_requirements(python: Path) -> tuple[str, str]:
+    variant, driver = choose_torch_cuda_variant("TOONCRAFTER_CUDA_VARIANT", cuda12_variant="cu121")
+    metadata = CUDA_VARIANTS[variant]
+    index = os.environ.get("TOONCRAFTER_TORCH_INDEX", str(metadata["index"]))
+    expected_cuda = str(metadata["runtime"])
+    driver_text = f"{driver[0]}.{driver[1]}" if driver else "unknown"
+    print(f"ToonCrafter CUDA stack: {variant} (driver reports CUDA {driver_text})")
+    print(f"PyTorch index: {index}")
+
+    command = [python, "-m", "pip", "install"]
+    if installed_torch_cuda(python) != expected_cuda:
+        command.append("--force-reinstall")
+    command += [
+        "torch==2.1.0",
+        "torchvision==0.16.0",
+        "--index-url",
+        index,
+    ]
+    run(command)
+    run([python, "-m", "pip", "install", "xformers==0.0.22.post7"])
+    run([python, "-m", "pip", "install", "-r", _filtered_requirements()])
     run([python, "-m", "pip", "install", "huggingface_hub>=0.25,<1"])
+    run([python, "-m", "pip", "check"])
+    validate_cuda_runtime(python, expected_cuda)
+    return variant, expected_cuda
 
 
 def download_model(python: Path) -> Path:
@@ -88,17 +112,53 @@ def download_model(python: Path) -> Path:
     return destination
 
 
+def validate_runtime(python: Path, checkpoint: Path) -> None:
+    code = f"""
+import os
+import sys
+from pathlib import Path
+import torch
+import decord
+import einops
+import omegaconf
+import pytorch_lightning
+import transformers
+import xformers
+
+source = Path({str(SOURCE)!r})
+checkpoint = Path({str(checkpoint)!r})
+os.chdir(source)
+sys.path.insert(0, str(source))
+sys.path.insert(0, str(source / 'lvdm'))
+from utils.utils import instantiate_from_config
+from lvdm.models.samplers.ddim import DDIMSampler
+
+try:
+    state = torch.load(str(checkpoint), map_location='cpu', mmap=True)
+except TypeError:
+    state = torch.load(str(checkpoint), map_location='cpu')
+assert isinstance(state, dict) and state, 'ToonCrafter checkpoint is empty or invalid'
+del state
+print('ToonCrafter runtime imports: ok')
+print('ToonCrafter checkpoint CPU load: ok')
+"""
+    run([python, "-c", code])
+
+
 def main() -> None:
     print("Installing ToonCrafter generative cartoon interpolation")
     ensure_repo(REPOSITORY, SOURCE)
     python = ensure_venv(VENV, choose_python())
-    install_requirements(python)
+    cuda_variant, expected_cuda = install_requirements(python)
     checkpoint = download_model(python)
+    validate_runtime(python, checkpoint)
 
     print("\nToonCrafter setup complete.")
     print(f"Python:     {python}")
     print(f"Source:     {SOURCE}")
     print(f"Checkpoint: {checkpoint}")
+    print(f"CUDA:       {cuda_variant} / PyTorch runtime {expected_cuda}")
+    print("Runtime preflight: CUDA, imports and checkpoint CPU load all passed.")
     print("The official model targets 512x320 and is very memory hungry. The WebP worker uses FP16, component offload and reduced-resolution retries, but 4 GB GPUs may still be below the practical floor.")
     print("Restart app_all.py if it is already running.")
 
