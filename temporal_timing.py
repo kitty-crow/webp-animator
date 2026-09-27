@@ -60,6 +60,7 @@ def install(advanced_pipeline_module):
     import app as legacy
     import analysis_upload_reuse
     import generative_vfi
+    import generative_vfi_restore
     import geometry_cache
     import job_control
     import live_timeline
@@ -81,5 +82,6 @@ def install(advanced_pipeline_module):
     geometry_cache.install(advanced_pipeline_module, temporal_v2)
     analysis_upload_reuse.install_ui_patch()
     generative_vfi.install(legacy, temporal_v2)
+    generative_vfi_restore.install_ui_patch()
     job_control.install(legacy, advanced_pipeline_module, temporal_v2)
     live_timeline.install(job_control)
