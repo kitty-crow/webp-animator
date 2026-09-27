@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import subprocess
-import sys
 from pathlib import Path
 
 import engine_paths
@@ -16,9 +15,6 @@ import setup_rife
 import setup_speed
 import setup_tooncrafter
 import temporal_repair
-
-
-ROOT = Path(__file__).resolve().parent
 
 
 def _run_check(name: str, callback, results: list[tuple[str, str, str]]) -> None:
@@ -38,6 +34,13 @@ def _run_check(name: str, callback, results: list[tuple[str, str, str]]) -> None
         print(f"{name}: PASS")
 
 
+def _cuda_check(python: Path, *, cupy: bool = False) -> None:
+    runtime = setup_engine_common.installed_torch_cuda(python)
+    if not runtime:
+        raise RuntimeError(f"{python} does not report a PyTorch CUDA runtime.")
+    setup_engine_common.validate_cuda_runtime(python, runtime, require_cupy=cupy)
+
+
 def main() -> int:
     results: list[tuple[str, str, str]] = []
 
@@ -47,35 +50,44 @@ def main() -> int:
     rife_compat.install(legacy)
     ready, python, source, model = legacy.rife_paths()
     if ready:
-        _run_check("RIFE", lambda: setup_rife.validate_runtime(Path(python)), results)
+        def rife_check():
+            _cuda_check(Path(python))
+            setup_rife.validate_runtime(Path(python))
+        _run_check("RIFE", rife_check, results)
     else:
         results.append(("RIFE", "SKIP", "not installed"))
 
     ready, python, source, config, checkpoint = engine_paths.amt_paths()
     if ready:
-        _run_check("AMT", lambda: setup_amt.validate_runtime(Path(python)), results)
+        def amt_check():
+            _cuda_check(Path(python))
+            setup_amt.validate_runtime(Path(python))
+        _run_check("AMT", amt_check, results)
     else:
         results.append(("AMT", "SKIP", "not installed"))
 
     ready, python, source, config, checkpoint = engine_paths.eden_paths()
     if ready:
-        _run_check("EDEN", lambda: setup_eden.validate_runtime(Path(python)), results)
+        def eden_check():
+            _cuda_check(Path(python), cupy=True)
+            setup_eden.validate_runtime(Path(python))
+        _run_check("EDEN", eden_check, results)
     else:
         results.append(("EDEN", "SKIP", "not installed"))
 
     ready, python, source, config, checkpoint = engine_paths.speed_paths()
     if ready:
-        _run_check("SPEED", lambda: setup_speed.validate_runtime(Path(python)), results)
+        def speed_check():
+            _cuda_check(Path(python))
+            setup_speed.validate_runtime(Path(python))
+        _run_check("SPEED", speed_check, results)
     else:
         results.append(("SPEED", "SKIP", "not installed"))
 
     ready, python, source, model = engine_paths.resshift_paths()
     if ready:
         def resshift_check():
-            runtime = setup_engine_common.installed_torch_cuda(Path(python))
-            if not runtime:
-                raise RuntimeError("ResShift PyTorch does not report a CUDA runtime.")
-            setup_engine_common.validate_cuda_runtime(Path(python), runtime, require_cupy=True)
+            _cuda_check(Path(python), cupy=True)
             setup_resshift._validate_runtime(Path(python))
         _run_check("ResShift", resshift_check, results)
     else:
@@ -94,29 +106,30 @@ def main() -> int:
             results.append((label, "SKIP", "not installed"))
     if mog_variants and mog_python is not None and mog_flow is not None:
         labels = " + ".join(label for label, _ in mog_variants)
-        _run_check(
-            labels,
-            lambda: setup_mog.validate_runtime(
+        def mog_check():
+            _cuda_check(mog_python, cupy=True)
+            setup_mog.validate_runtime(
                 mog_python,
                 [checkpoint for _, checkpoint in mog_variants],
                 mog_flow,
-            ),
-            results,
-        )
+            )
+        _run_check(labels, mog_check, results)
 
     ready, python, source, config, checkpoint = engine_paths.tooncrafter_paths()
     if ready:
-        _run_check(
-            "ToonCrafter",
-            lambda: setup_tooncrafter.validate_runtime(Path(python), Path(checkpoint)),
-            results,
-        )
+        def toon_check():
+            _cuda_check(Path(python))
+            setup_tooncrafter.validate_runtime(Path(python), Path(checkpoint))
+        _run_check("ToonCrafter", toon_check, results)
     else:
         results.append(("ToonCrafter", "SKIP", "not installed"))
 
     ready, python, source = temporal_repair.propainter_paths()
     if ready:
-        _run_check("ProPainter", lambda: setup_propainter.validate_runtime(Path(python)), results)
+        def propainter_check():
+            _cuda_check(Path(python))
+            setup_propainter.validate_runtime(Path(python))
+        _run_check("ProPainter", propainter_check, results)
     else:
         results.append(("ProPainter", "SKIP", "not installed"))
 
