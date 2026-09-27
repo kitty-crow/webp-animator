@@ -70,6 +70,7 @@ def install(advanced_pipeline_module):
     import temporal_repair
     import temporal_v2
     import timeline_pipeline
+    import tooncrafter_vfi
 
     operation_pipeline.install(temporal_v2)
     looped_animation.install(temporal_v2)
@@ -81,6 +82,7 @@ def install(advanced_pipeline_module):
     # reuse the exact matched/canvas-normalised frames when sources/settings match.
     geometry_cache.install(advanced_pipeline_module, temporal_v2)
     analysis_upload_reuse.install_ui_patch()
+    tooncrafter_vfi.install_backend()
     generative_vfi.install(legacy, temporal_v2)
     generative_vfi_restore.install_ui_patch()
     job_control.install(legacy, advanced_pipeline_module, temporal_v2)
