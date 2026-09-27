@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +33,7 @@ ENGINE_REGISTRY: tuple[dict[str, Any], ...] = (
         "label": "Multi-Input ResShift Diffusion",
         "hint": "Endpoint-constrained residual diffusion for difficult occlusion, articulation and missing-content transitions.",
         "generative": True,
+        "requires_cuda": True,
         "order": 30,
     },
     {
@@ -39,6 +42,7 @@ ENGINE_REGISTRY: tuple[dict[str, Any], ...] = (
         "label": "MoG Animation",
         "hint": "Motion-aware generative interpolation tuned for animation.",
         "generative": True,
+        "requires_cuda": True,
         "order": 40,
         "low_vram_warning_gb": 6,
     },
@@ -48,6 +52,7 @@ ENGINE_REGISTRY: tuple[dict[str, Any], ...] = (
         "label": "MoG Real-world",
         "hint": "Motion-aware generative interpolation tuned for photographic and real-world footage.",
         "generative": True,
+        "requires_cuda": True,
         "order": 50,
         "low_vram_warning_gb": 6,
     },
@@ -57,6 +62,7 @@ ENGINE_REGISTRY: tuple[dict[str, Any], ...] = (
         "label": "ToonCrafter (cartoon/anime)",
         "hint": "Generative cartoon interpolation that creates a transition from the two endpoint frames and selects the requested in-betweens.",
         "generative": True,
+        "requires_cuda": True,
         "order": 60,
         "low_vram_warning_gb": 6,
     },
@@ -82,6 +88,8 @@ _ENGINE_BY_ID = {
     str(definition["id"]).strip().lower(): definition
     for definition in ENGINE_REGISTRY
 }
+_RUNTIME_CACHE: dict[str, dict[str, Any]] = {}
+_RUNTIME_LOCK = threading.RLock()
 
 
 def engine_definition(engine_id: object) -> dict[str, Any] | None:
@@ -116,6 +124,53 @@ def engine_is_generative(engine_id: object) -> bool:
     return bool(definition and definition.get("generative", False))
 
 
+def _cuda_runtime_probe(python_path: object) -> dict[str, Any]:
+    path = str(python_path or "").strip()
+    if not path:
+        return {"ready": False, "error": "Engine Python executable is missing."}
+    with _RUNTIME_LOCK:
+        cached = _RUNTIME_CACHE.get(path)
+        if cached is not None:
+            return dict(cached)
+
+    command = [
+        path,
+        "-c",
+        (
+            "import torch; "
+            "print(torch.__version__); "
+            "print(torch.version.cuda or ''); "
+            "print('1' if torch.cuda.is_available() else '0'); "
+            "print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else '')"
+        ),
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        lines = [line.strip() for line in result.stdout.splitlines()]
+        ready = result.returncode == 0 and len(lines) >= 3 and lines[2] == "1"
+        probe = {
+            "ready": ready,
+            "torch": lines[0] if lines else None,
+            "cuda_runtime": lines[1] if len(lines) > 1 else None,
+            "device": lines[3] if len(lines) > 3 and lines[3] else None,
+        }
+        if not ready:
+            details = (result.stderr or result.stdout or "PyTorch reports CUDA unavailable.").strip()
+            probe["error"] = details[-1200:]
+    except Exception as exc:
+        probe = {"ready": False, "error": str(exc)}
+
+    with _RUNTIME_LOCK:
+        _RUNTIME_CACHE[path] = dict(probe)
+    return probe
+
+
 def _app_all_module():
     module = sys.modules.get("app_all")
     if module is not None:
@@ -136,10 +191,19 @@ def catalog_from_status(state: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(runtime, dict):
             runtime = {}
         entry = dict(definition)
-        entry["ready"] = bool(runtime.get("ready", False))
+        file_ready = bool(runtime.get("ready", False))
+        entry["ready"] = file_ready
+
+        if file_ready and bool(definition.get("requires_cuda", False)):
+            probe = _cuda_runtime_probe(runtime.get("python"))
+            entry["runtime"] = probe
+            if not bool(probe.get("ready", False)):
+                entry["ready"] = False
+                entry["error"] = str(probe.get("error") or "CUDA runtime is not usable in this engine environment.")
+
         if runtime.get("setup"):
             entry["setup"] = str(runtime["setup"])
-        if runtime.get("error"):
+        if runtime.get("error") and not entry.get("error"):
             entry["error"] = str(runtime["error"])
         catalog.append(entry)
     catalog.sort(
