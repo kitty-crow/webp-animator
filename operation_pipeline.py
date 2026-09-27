@@ -150,6 +150,23 @@ def _interpolation_count(settings: dict) -> int:
     return max(0, multiplier - 1) if multiplier in {1, 2, 4, 8} else 0
 
 
+def _interpolation_request(temporal_v2, settings: dict, plans) -> tuple[int, bool]:
+    """Return requested count and whether zero means adaptive gap filling.
+
+    Interpolation density controls ordinary all-gap interpolation. Once Smart
+    Missing or an explicit/manual gap plan is active, the UI's Frames to fill
+    control is authoritative instead. In that targeted mode zero intentionally
+    means adaptive fill-until-threshold, so it must not be mistaken for 1x/no-op.
+    """
+    targeted = bool(settings.get("smart_missing", False)) or any(
+        bool(getattr(plan, "manual", False)) for plan in plans
+    )
+    if targeted:
+        count = temporal_v2._requested_fill_count(settings, True)
+        return count, count == 0
+    return _interpolation_count(settings), False
+
+
 def _insert_pair_refs(
     records: list[base.FrameRecord],
     pair: PairSpec,
@@ -238,8 +255,8 @@ def _engine_pass(
         if engine not in {"rife", "amt"}:
             progress(1.0, f"Pass {pass_number}/{pass_total} · interpolation skipped (interpolator is None)")
             return []
-        count = _interpolation_count(settings)
-        if count <= 0:
+        count, adaptive = _interpolation_request(temporal_v2, settings, plans)
+        if count <= 0 and not adaptive:
             progress(1.0, f"Pass {pass_number}/{pass_total} · interpolation skipped (density is 1×)")
             return []
         runner = lambda tasks, cb: temporal_v2._run_interpolator(legacy, engine, tasks, stage_dir, progress=cb)
