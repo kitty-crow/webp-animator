@@ -25,7 +25,7 @@ jobs:
           python -m py_compile \
             app.py app_all.py global_jobs.py anim_align_webp.py frame1_optimizer.py \
             rife_worker.py rife_selective_worker.py amt_worker.py eden_worker.py speed_worker.py \
-            resshift_selective_worker.py mog_selective_worker.py mog_selective_worker_v2.py generative_vfi.py \
+            resshift_selective_worker.py mog_selective_worker.py mog_selective_worker_v2.py generative_vfi.py generative_vfi_restore.py \
             advanced_pipeline.py temporal_v2.py engine_paths.py gpu_match.py smart_frames.py \
             webp_fast.py worker_common.py temporal_timing.py engine_progress.py looped_animation.py geometry_cache.py \
             job_control.py live_timeline.py operation_pipeline.py pipeline_live.py pipeline_settings.py \
@@ -44,6 +44,7 @@ jobs:
           assert b"Looped animation" in app_all.WORKSPACE_SCRIPT
           assert b"analysis-upload-reuse-ui-v2" in app_all.ADVANCED_SCRIPT
           assert b"generative-vfi-ui-v1" in app_all.ADVANCED_SCRIPT
+          assert b"generative-vfi-restore-ui-v1" in app_all.ADVANCED_SCRIPT
           assert b"OpenAI repair" not in app_all.INDEX_HTML
           PY
 
