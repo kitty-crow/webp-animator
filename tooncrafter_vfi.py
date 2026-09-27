@@ -32,7 +32,7 @@ def install_backend() -> None:
             )
         return [
             python,
-            ROOT / "tooncrafter_selective_worker.py",
+            ROOT / "tooncrafter_selective_worker_entry.py",
             "--tooncrafter-dir", source,
             "--config", config,
             "--checkpoint", checkpoint,
