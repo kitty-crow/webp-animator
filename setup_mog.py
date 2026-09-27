@@ -93,22 +93,38 @@ def download_model(python: Path, variant: str) -> None:
 
 
 def download_flow_checkpoint(python: Path) -> None:
-    destination = SOURCE / "emavfi" / "ckpt" / "ours_t.ckpt"
-    if destination.is_file() and destination.stat().st_size > 1024 * 1024:
-        print(f"Already present: {destination}")
+    checkpoint_dir = SOURCE / "emavfi" / "ckpt"
+    upstream_destination = checkpoint_dir / "ours_t.pkl"
+    compatibility_destination = checkpoint_dir / "ours_t.ckpt"
+
+    # Upstream's README calls this file ours_t.ckpt, but the Google Drive folder
+    # actually contains ours_t.pkl and emavfi/Trainer.py loads ours_t.pkl. Keep the
+    # real upstream filename and a compatibility copy for our existing worker path.
+    if upstream_destination.is_file() and upstream_destination.stat().st_size > 1024 * 1024:
+        if (
+            not compatibility_destination.is_file()
+            or compatibility_destination.stat().st_size != upstream_destination.stat().st_size
+        ):
+            shutil.copy2(upstream_destination, compatibility_destination)
+        print(f"Already present: {upstream_destination}")
         return
 
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="mog_flow_") as temp:
         temp_dir = Path(temp)
         run([python, "-m", "gdown", "--folder", FLOW_FOLDER, "-O", temp_dir])
-        candidates = list(temp_dir.rglob("ours_t.ckpt"))
+        candidates = list(temp_dir.rglob("ours_t.pkl"))
+        if not candidates:
+            # Retain compatibility with a future upstream folder correction.
+            candidates = list(temp_dir.rglob("ours_t.ckpt"))
         if not candidates:
             raise RuntimeError(
-                "MoG flow checkpoint download completed but ours_t.ckpt was not found. "
-                "Set MOG_FLOW_CHECKPOINT to an existing copy if Google Drive blocks the folder download."
+                "MoG flow checkpoint download completed but neither ours_t.pkl nor "
+                "ours_t.ckpt was found. Set MOG_FLOW_CHECKPOINT to an existing copy "
+                "if Google Drive blocks the folder download."
             )
-        shutil.copy2(candidates[0], destination)
+        shutil.copy2(candidates[0], upstream_destination)
+        shutil.copy2(candidates[0], compatibility_destination)
 
 
 def main() -> None:
