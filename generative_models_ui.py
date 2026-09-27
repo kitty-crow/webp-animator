@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 
 UI_PATCH = r'''
@@ -133,8 +134,17 @@ UI_PATCH = r'''
 '''.strip()
 
 
+def _app_all_module():
+    module = sys.modules.get("app_all")
+    if module is not None:
+        return module
+    module = sys.modules.get("__main__")
+    filename = Path(str(getattr(module, "__file__", ""))).name.lower() if module else ""
+    return module if filename == "app_all.py" else None
+
+
 def install_ui_patch() -> None:
-    app_all = sys.modules.get("app_all")
+    app_all = _app_all_module()
     if app_all is None:
         return
 
