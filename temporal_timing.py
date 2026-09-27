@@ -59,6 +59,7 @@ def install(advanced_pipeline_module):
 
     import app as legacy
     import analysis_upload_reuse
+    import engine_catalog
     import generative_models_ui
     import generative_vfi
     import generative_vfi_restore
@@ -75,6 +76,7 @@ def install(advanced_pipeline_module):
     import tooncrafter_vfi
 
     rife_compat.install(legacy)
+    engine_catalog.install_status_endpoint()
     operation_pipeline.install(temporal_v2)
     looped_animation.install(temporal_v2)
     timeline_pipeline.install(operation_pipeline)
