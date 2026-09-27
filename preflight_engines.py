@@ -29,8 +29,8 @@ def parse_args():
         dest="full",
         action="store_true",
         help=(
-            "Explicitly request full heavy-model qualification. This is now the default: "
-            "MoG/ToonCrafter are instantiated and their diffusion cores must fit on the GPU."
+            "Run real one-step inference through MoG/ToonCrafter, including RAM/disk "
+            "offload hooks. This is the default and is the release-qualification path."
         ),
     )
     parser.add_argument(
@@ -38,8 +38,8 @@ def parse_args():
         dest="full",
         action="store_false",
         help=(
-            "Skip expensive MoG/ToonCrafter model-placement qualification and only check "
-            "environments/imports/checkpoints. Use this only for diagnostics, not release qualification."
+            "Skip expensive MoG/ToonCrafter inference and only check environments, "
+            "imports and checkpoints. Use this only for diagnostics."
         ),
     )
     parser.set_defaults(full=True)
@@ -111,10 +111,15 @@ def _full_mog_check(
     flow_checkpoint: Path,
     variant: str,
 ) -> None:
+    # Placement-only tests missed the exact class of failures we were seeing: an
+    # offloaded module can load successfully, then legacy upstream code calls .to()
+    # on an Accelerate `meta` placeholder during the first real inference. Exercise
+    # the whole endpoint->flow->VAE->DDIM->decode path with one DDIM step instead.
     code = f"""
 import gc
 import sys
 from pathlib import Path
+from PIL import Image, ImageDraw
 root = Path({str(ROOT)!r})
 sys.path.insert(0, str(root))
 import mog_selective_worker as entry
@@ -125,9 +130,20 @@ torch, device, model, inference, total_vram = impl.load_model(
     Path({str(checkpoint)!r}),
     Path({str(flow_checkpoint)!r}),
 )
+first = Image.new('RGBA', (96, 64), (0, 0, 0, 0))
+second = Image.new('RGBA', (96, 64), (0, 0, 0, 0))
+d0 = ImageDraw.Draw(first); d1 = ImageDraw.Draw(second)
+d0.rectangle((12, 16, 44, 48), fill=(255, 80, 40, 255))
+d1.rectangle((48, 16, 80, 48), fill=(255, 80, 40, 255))
+frames = impl._generate_clip(
+    torch, model, inference, first, second, (224, 128), ddim_steps=1
+)
+assert frames, 'MoG inference smoke produced no frames'
 torch.cuda.synchronize()
-print('MoG {variant} full model GPU placement: ok', f'{{total_vram / 1024**3:.1f}}GB GPU')
-del model, inference
+print('MoG {variant} real inference smoke: ok', len(frames), 'frames',
+      'offload=' + str(getattr(model, '_webp_offload_mode', 'gpu')),
+      f'{{total_vram / 1024**3:.1f}}GB GPU')
+del frames, model, inference
 gc.collect()
 torch.cuda.empty_cache()
 """
@@ -144,6 +160,7 @@ def _full_tooncrafter_check(
 import gc
 import sys
 from pathlib import Path
+from PIL import Image, ImageDraw
 root = Path({str(ROOT)!r})
 sys.path.insert(0, str(root))
 import tooncrafter_selective_worker_entry as entry
@@ -153,11 +170,20 @@ torch, device, model, total_vram = impl.load_model(
     Path({str(config)!r}),
     Path({str(checkpoint)!r}),
 )
-impl._move_core(model, device)
+first = Image.new('RGBA', (96, 64), (0, 0, 0, 0))
+second = Image.new('RGBA', (96, 64), (0, 0, 0, 0))
+d0 = ImageDraw.Draw(first); d1 = ImageDraw.Draw(second)
+d0.ellipse((12, 14, 46, 50), fill=(60, 170, 255, 255))
+d1.ellipse((48, 14, 82, 50), fill=(60, 170, 255, 255))
+frames = impl._generate_clip(
+    torch, device, model, first, second, (224, 128), ddim_steps=1
+)
+assert frames, 'ToonCrafter inference smoke produced no frames'
 torch.cuda.synchronize()
-print('ToonCrafter diffusion-core GPU placement: ok', f'{{total_vram / 1024**3:.1f}}GB GPU')
-impl._move_core(model, torch.device('cpu'))
-del model
+print('ToonCrafter real inference smoke: ok', len(frames), 'frames',
+      'offload=' + str(getattr(model, '_webp_offload_mode', 'gpu')),
+      f'{{total_vram / 1024**3:.1f}}GB GPU')
+del frames, model
 gc.collect()
 torch.cuda.empty_cache()
 """
@@ -290,7 +316,7 @@ def main() -> int:
         return 1
     print("\nAll installed engine preflights passed.")
     if not args.full:
-        print("Quick mode skipped MoG/ToonCrafter full model placement; do not treat this as release qualification.")
+        print("Quick mode skipped MoG/ToonCrafter real inference; do not treat this as release qualification.")
     return 0
 
 
