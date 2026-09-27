@@ -5,9 +5,12 @@ from pathlib import Path
 
 
 UI_PATCH = r'''
-/* engine-catalog-ui-v4 */
+/* engine-catalog-ui-v5 */
 (() => {
   "use strict";
+
+  if (window.__webpEngineCatalogBootstrapV5) return;
+  window.__webpEngineCatalogBootstrapV5 = true;
 
   let engineState = null;
   let attempts = 0;
@@ -28,7 +31,7 @@ UI_PATCH = r'''
   }
 
   function populate(select, role) {
-    const previous = select.value;
+    const desired = String(select.dataset.pendingRestoreValue || select.value || "none");
     const engines = enginesFor(role);
     select.replaceChildren();
 
@@ -44,8 +47,9 @@ UI_PATCH = r'''
       select.append(option);
     }
 
-    if ([...select.options].some(option => option.value === previous)) {
-      select.value = previous;
+    if ([...select.options].some(option => option.value === desired)) {
+      select.value = desired;
+      delete select.dataset.pendingRestoreValue;
     }
   }
 
@@ -108,6 +112,7 @@ UI_PATCH = r'''
     );
     updateStatus();
 
+    window.webpEngineCatalogState = engineState;
     document.dispatchEvent(new CustomEvent("webp-engine-catalog-ready", { detail: engineState }));
     return true;
   }
@@ -148,22 +153,24 @@ def install_ui_patch() -> None:
     if app_all is None:
         return
 
-    marker = b"/* engine-catalog-ui-v4 */"
+    marker = b"/* engine-catalog-ui-v5 */"
 
-    # app_all serves this script directly. Appending the catalog bootstrap here also
-    # keeps direct /advanced-ui.js consumers in sync with the runtime engine registry.
+    # app_all serves this script directly. Keep exactly one catalogue bootstrap in
+    # advanced-ui.js; the previous inline duplicate could fetch/populate twice and
+    # race job restoration.
     if hasattr(app_all, "ADVANCED_SCRIPT") and marker not in bytes(app_all.ADVANCED_SCRIPT):
         app_all.ADVANCED_SCRIPT = bytes(app_all.ADVANCED_SCRIPT) + b"\n\n" + UI_PATCH.encode("utf-8") + b"\n"
 
-    # app_all's HTML gets a cache-busted advanced script plus an inline bootstrap so
-    # selector discovery is independent of script execution order.
     if hasattr(app_all, "INDEX_HTML"):
         html = bytes(app_all.INDEX_HTML)
         html = html.replace(
             b'/advanced-ui.js"',
-            b'/advanced-ui.js?v=engine-catalog-v4"',
+            b'/advanced-ui.js?v=engine-catalog-v5"',
         )
-        if marker not in html:
-            inline = b"\n<script>\n" + UI_PATCH.encode("utf-8") + b"\n</script>\n"
-            html = html.replace(b"</body>", inline + b"</body>", 1)
+        # Upgrade pages that already carried the v4 query in a persisted/appended
+        # template during development.
+        html = html.replace(
+            b'/advanced-ui.js?v=engine-catalog-v4"',
+            b'/advanced-ui.js?v=engine-catalog-v5"',
+        )
         app_all.INDEX_HTML = html
