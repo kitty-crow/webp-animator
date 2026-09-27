@@ -89,6 +89,15 @@ def engine_definition(engine_id: object) -> dict[str, Any] | None:
     return dict(definition) if definition is not None else None
 
 
+def engine_ids(role: str | None = None) -> set[str]:
+    wanted = str(role or "").strip().lower()
+    return {
+        engine_id
+        for engine_id, definition in _ENGINE_BY_ID.items()
+        if not wanted or str(definition.get("role", "")).strip().lower() == wanted
+    }
+
+
 def engine_role(engine_id: object) -> str | None:
     definition = _ENGINE_BY_ID.get(str(engine_id or "").strip().lower())
     return str(definition.get("role")) if definition is not None and definition.get("role") else None
@@ -100,6 +109,11 @@ def engine_label(engine_id: object) -> str:
     if definition is not None and definition.get("label"):
         return str(definition["label"])
     return text.upper() if text else "Engine"
+
+
+def engine_is_generative(engine_id: object) -> bool:
+    definition = _ENGINE_BY_ID.get(str(engine_id or "").strip().lower())
+    return bool(definition and definition.get("generative", False))
 
 
 def _app_all_module():
