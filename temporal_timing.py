@@ -61,6 +61,7 @@ def install(advanced_pipeline_module):
     import analysis_upload_reuse
     import engine_catalog
     import generative_models_ui
+    import generative_pipeline_bridge
     import generative_vfi
     import generative_vfi_restore
     import geometry_cache
@@ -89,6 +90,7 @@ def install(advanced_pipeline_module):
     analysis_upload_reuse.install_ui_patch()
     tooncrafter_vfi.install_backend()
     generative_vfi.install(legacy, temporal_v2)
+    generative_pipeline_bridge.install(temporal_v2)
     generative_vfi_restore.install_ui_patch()
     generative_models_ui.install_ui_patch()
     job_control.install(legacy, advanced_pipeline_module, temporal_v2)
