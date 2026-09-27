@@ -12,6 +12,7 @@ from setup_engine_common import (
     choose_torch_cuda_variant,
     ensure_repo,
     ensure_venv,
+    install_optional_xformers,
     installed_torch_cuda,
     run,
     validate_cuda_runtime,
@@ -109,11 +110,11 @@ def install_requirements(python: Path) -> tuple[str, str]:
 
     run([python, "-m", "pip", "uninstall", "-y", "cupy-cuda11x", "cupy-cuda12x"], check=False)
     run([python, "-m", "pip", "install", cupy_package])
-    run([python, "-m", "pip", "install", "xformers==0.0.22.post7"])
     run([python, "-m", "pip", "install", "-r", _filtered_requirements()])
     run([python, "-m", "pip", "install", "gdown", "huggingface_hub>=0.25,<1"])
-    run([python, "-m", "pip", "check"])
     validate_cuda_runtime(python, expected_cuda, require_cupy=True)
+    install_optional_xformers(python, "0.0.22.post7")
+    run([python, "-m", "pip", "check"])
     return variant, expected_cuda
 
 
@@ -171,7 +172,7 @@ def download_flow_checkpoint(python: Path) -> Path:
 
 
 def validate_runtime(python: Path, checkpoints: list[Path], flow_checkpoint: Path) -> None:
-    """Validate the imports and both checkpoint formats without allocating the full model on VRAM."""
+    """Validate imports and both checkpoint formats without allocating the full diffusion model on VRAM."""
     code = f"""
 import os
 import sys
@@ -183,7 +184,6 @@ import einops
 import omegaconf
 import pytorch_lightning
 import transformers
-import xformers
 
 source = Path({str(SOURCE)!r})
 os.chdir(source)
@@ -207,6 +207,11 @@ print('MoG runtime imports: ok')
 print('MoG flow checkpoint CPU load: ok')
 print('MoG diffusion checkpoint CPU load: ok')
 print('MoG CuPy devices:', cupy.cuda.runtime.getDeviceCount())
+try:
+    import xformers
+    print('MoG attention: xFormers enabled')
+except Exception:
+    print('MoG attention: PyTorch fallback')
 """
     run([python, "-c", code])
 
