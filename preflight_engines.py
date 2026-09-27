@@ -41,6 +41,39 @@ def _cuda_check(python: Path, *, cupy: bool = False) -> None:
     setup_engine_common.validate_cuda_runtime(python, runtime, require_cupy=cupy)
 
 
+def _optional_xformers_check(python: Path) -> None:
+    """If xFormers is installed, prove that its attention op supports this GPU."""
+    result = subprocess.run(
+        [
+            str(python),
+            "-c",
+            (
+                "import importlib.util, sys; "
+                "spec=importlib.util.find_spec('xformers'); "
+                "sys.exit(0) if spec is None else None; "
+                "import torch, xformers.ops; "
+                "assert torch.cuda.is_available(); "
+                "q=torch.randn((2,16,32),device='cuda',dtype=torch.float16); "
+                "y=xformers.ops.memory_efficient_attention(q,q,q); "
+                "torch.cuda.synchronize(); "
+                "print('xFormers attention kernel: ok', tuple(y.shape))"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        details = (result.stderr or result.stdout or "xFormers kernel probe failed").strip()
+        raise RuntimeError(
+            "xFormers is installed but its memory-efficient-attention kernel is not usable on this GPU. "
+            "Rerun that engine's setup so it removes xFormers and selects the PyTorch fallback.\n"
+            + details[-1200:]
+        )
+    if result.stdout.strip():
+        print(result.stdout.strip())
+
+
 def main() -> int:
     results: list[tuple[str, str, str]] = []
 
@@ -70,6 +103,7 @@ def main() -> int:
     if ready:
         def eden_check():
             _cuda_check(Path(python), cupy=True)
+            _optional_xformers_check(Path(python))
             setup_eden.validate_runtime(Path(python))
         _run_check("EDEN", eden_check, results)
     else:
@@ -108,6 +142,7 @@ def main() -> int:
         labels = " + ".join(label for label, _ in mog_variants)
         def mog_check():
             _cuda_check(mog_python, cupy=True)
+            _optional_xformers_check(mog_python)
             setup_mog.validate_runtime(
                 mog_python,
                 [checkpoint for _, checkpoint in mog_variants],
@@ -119,6 +154,7 @@ def main() -> int:
     if ready:
         def toon_check():
             _cuda_check(Path(python))
+            _optional_xformers_check(Path(python))
             setup_tooncrafter.validate_runtime(Path(python), Path(checkpoint))
         _run_check("ToonCrafter", toon_check, results)
     else:
