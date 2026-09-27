@@ -25,11 +25,13 @@ jobs:
           python -m py_compile \
             app.py app_all.py global_jobs.py anim_align_webp.py frame1_optimizer.py \
             rife_worker.py rife_selective_worker.py amt_worker.py eden_worker.py speed_worker.py \
+            resshift_selective_worker.py mog_selective_worker.py generative_vfi.py \
             advanced_pipeline.py temporal_v2.py engine_paths.py gpu_match.py smart_frames.py \
             webp_fast.py worker_common.py temporal_timing.py engine_progress.py looped_animation.py geometry_cache.py \
             job_control.py live_timeline.py operation_pipeline.py pipeline_live.py pipeline_settings.py \
             temporal_repair.py propainter_repair_worker.py timeline_pipeline.py analysis_upload_reuse.py \
-            setup_rife.py setup_engine_common.py setup_acceleration.py setup_amt.py setup_eden.py setup_speed.py setup_propainter.py
+            setup_rife.py setup_engine_common.py setup_acceleration.py setup_amt.py setup_eden.py setup_speed.py setup_propainter.py \
+            setup_resshift.py setup_mog.py
           node --check advanced_ui.js
           node --check live_run_ui.js
           node --check workspace_ui/workspace.js
@@ -41,6 +43,7 @@ jobs:
           assert b"advanced-ui.js" in app_all.INDEX_HTML
           assert b"Looped animation" in app_all.WORKSPACE_SCRIPT
           assert b"analysis-upload-reuse-ui-v2" in app_all.ADVANCED_SCRIPT
+          assert b"generative-vfi-ui-v1" in app_all.ADVANCED_SCRIPT
           assert b"OpenAI repair" not in app_all.INDEX_HTML
           PY
 
@@ -58,6 +61,7 @@ jobs:
           test_looped_animation.py
           test_geometry_cache.py
           test_analysis_upload_reuse.py
+          test_generative_vfi.py
 
       - name: Ensure retired OpenAI systems stay absent
         shell: bash
