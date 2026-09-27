@@ -4,13 +4,49 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from setup_engine_common import choose_python, download, ensure_repo, ensure_venv, run
+from setup_engine_common import choose_python, download, ensure_repo, ensure_venv, run, validate_cuda_runtime
 
 ROOT = Path(__file__).resolve().parent
 SOURCE = ROOT / "third_party" / "EDEN"
 VENV = ROOT / ".eden-venv"
+CONFIG = SOURCE / "configs" / "eval_eden.yaml"
 CHECKPOINT = SOURCE / "checkpoints" / "eden.pt"
 CHECKPOINT_URL = "https://huggingface.co/zhZ524/EDEN/resolve/main/eden.pt"
+
+
+def validate_runtime(python: Path) -> None:
+    code = f"""
+import gc
+import os
+import sys
+from pathlib import Path
+import torch
+import yaml
+source = Path({str(SOURCE)!r})
+config_path = Path({str(CONFIG)!r})
+checkpoint_path = Path({str(CHECKPOINT)!r})
+os.chdir(source)
+sys.path.insert(0, str(source))
+from src.models import load_model
+config = yaml.unsafe_load(config_path.read_text(encoding='utf-8'))
+model_args = dict(config['model_args'])
+if bool(model_args.get('use_xformers', False)):
+    try:
+        import xformers
+    except Exception:
+        model_args['use_xformers'] = False
+model = load_model(config['model_name'], **model_args)
+checkpoint = torch.load(str(checkpoint_path), map_location='cpu')
+model.load_state_dict(checkpoint['eden'])
+del checkpoint
+model = model.to('cuda').eval()
+torch.cuda.synchronize()
+print('EDEN model load: ok')
+del model
+gc.collect()
+torch.cuda.empty_cache()
+"""
+    run([python, "-c", code])
 
 
 def main():
@@ -57,11 +93,15 @@ def main():
     ])
     if completed.returncode != 0:
         print("WARNING: xformers could not be installed; EDEN will use PyTorch attention.")
+    run([python, "-m", "pip", "check"])
+    validate_cuda_runtime(python, "11.8", require_cupy=True)
     download(CHECKPOINT_URL, CHECKPOINT)
+    validate_runtime(python)
     print("\nEDEN setup complete.")
     print(f"Python:     {python}")
     print(f"Source:     {SOURCE}")
     print(f"Checkpoint: {CHECKPOINT}")
+    print("Runtime preflight: CUDA, CuPy and actual EDEN model load passed.")
 
 
 if __name__ == "__main__":
