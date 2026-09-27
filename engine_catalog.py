@@ -17,6 +17,7 @@ ENGINE_REGISTRY: tuple[dict[str, Any], ...] = (
         "label": "RIFE",
         "hint": "Fast conventional temporal interpolation for smooth in-betweens.",
         "generative": False,
+        "requires_cuda": True,
         "order": 10,
     },
     {
@@ -218,7 +219,24 @@ def catalog_from_status(state: dict[str, Any]) -> list[dict[str, Any]]:
 
 def decorate_status(state: dict[str, Any]) -> dict[str, Any]:
     value = dict(state)
-    value["engines"] = catalog_from_status(value)
+    catalog = catalog_from_status(value)
+    value["engines"] = catalog
+
+    # Keep the legacy top-level status entries aligned with the catalogue. Older UI
+    # code still checks state[engine].ready directly, so a CUDA-broken environment
+    # must not be selectable there while the catalogue correctly says it is unusable.
+    for entry in catalog:
+        engine_id = str(entry.get("id", ""))
+        if not engine_id:
+            continue
+        runtime = value.get(engine_id)
+        runtime = dict(runtime) if isinstance(runtime, dict) else {}
+        runtime["ready"] = bool(entry.get("ready", False))
+        if entry.get("runtime") is not None:
+            runtime["runtime"] = entry["runtime"]
+        if entry.get("error"):
+            runtime["error"] = str(entry["error"])
+        value[engine_id] = runtime
     return value
 
 
