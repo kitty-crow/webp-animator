@@ -81,6 +81,7 @@ def install(advanced_pipeline_module):
 
     import app as legacy
     import analysis_upload_reuse
+    import dynamic_settings_restore
     import engine_catalog
     import generative_models_ui
     import generative_pipeline_bridge
@@ -120,6 +121,7 @@ def install(advanced_pipeline_module):
     generative_vfi.install(legacy, temporal_v2)
     generative_pipeline_bridge.install(temporal_v2)
     generative_vfi_restore.install_ui_patch()
+    dynamic_settings_restore.install_ui_patch()
     generative_models_ui.install_ui_patch()
     job_control.install(legacy, advanced_pipeline_module, temporal_v2)
     generative_process_control.install(generative_vfi)
