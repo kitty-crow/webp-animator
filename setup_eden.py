@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
-from setup_engine_common import choose_python, download, ensure_repo, ensure_venv, run, validate_cuda_runtime
+from setup_engine_common import (
+    choose_python,
+    download,
+    ensure_repo,
+    ensure_venv,
+    install_optional_xformers,
+    run,
+    validate_cuda_runtime,
+)
 
 ROOT = Path(__file__).resolve().parent
 SOURCE = ROOT / "third_party" / "EDEN"
@@ -42,6 +49,7 @@ del checkpoint
 model = model.to('cuda').eval()
 torch.cuda.synchronize()
 print('EDEN model load: ok')
+print('EDEN attention:', 'xFormers' if model_args.get('use_xformers', False) else 'PyTorch fallback')
 del model
 gc.collect()
 torch.cuda.empty_cache()
@@ -81,27 +89,16 @@ def main():
     # EDEN's src.utils imports FloLPIPS at module import time, and its correlation
     # kernel imports CuPy even though the interpolation worker does not calculate
     # that metric. Keeping CuPy here avoids an upstream import-time failure.
-    # xFormers is an acceleration rather than a correctness dependency. Some
-    # Windows/Pascal combinations do not have a compatible wheel, and the worker
-    # falls back to ordinary PyTorch attention cleanly in that case.
-    completed = subprocess.run([
-        str(python),
-        "-m",
-        "pip",
-        "install",
-        "xformers==0.0.22",
-    ])
-    if completed.returncode != 0:
-        print("WARNING: xformers could not be installed; EDEN will use PyTorch attention.")
-    run([python, "-m", "pip", "check"])
     validate_cuda_runtime(python, "11.8", require_cupy=True)
+    install_optional_xformers(python, "0.0.22")
+    run([python, "-m", "pip", "check"])
     download(CHECKPOINT_URL, CHECKPOINT)
     validate_runtime(python)
     print("\nEDEN setup complete.")
     print(f"Python:     {python}")
     print(f"Source:     {SOURCE}")
     print(f"Checkpoint: {CHECKPOINT}")
-    print("Runtime preflight: CUDA, CuPy and actual EDEN model load passed.")
+    print("Runtime preflight: CUDA, CuPy, attention backend and actual EDEN model load passed.")
 
 
 if __name__ == "__main__":
