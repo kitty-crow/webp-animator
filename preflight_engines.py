@@ -26,12 +26,23 @@ def parse_args():
     )
     parser.add_argument(
         "--full",
+        dest="full",
         action="store_true",
         help=(
-            "Also instantiate the very large MoG/ToonCrafter models and prove their "
-            "diffusion cores fit on the current GPU. This can take several minutes."
+            "Explicitly request full heavy-model qualification. This is now the default: "
+            "MoG/ToonCrafter are instantiated and their diffusion cores must fit on the GPU."
         ),
     )
+    parser.add_argument(
+        "--quick",
+        dest="full",
+        action="store_false",
+        help=(
+            "Skip expensive MoG/ToonCrafter model-placement qualification and only check "
+            "environments/imports/checkpoints. Use this only for diagnostics, not release qualification."
+        ),
+    )
+    parser.set_defaults(full=True)
     return parser.parse_args()
 
 
@@ -279,7 +290,7 @@ def main() -> int:
         return 1
     print("\nAll installed engine preflights passed.")
     if not args.full:
-        print("Run again with --full to qualify MoG/ToonCrafter full model placement on this GPU.")
+        print("Quick mode skipped MoG/ToonCrafter full model placement; do not treat this as release qualification.")
     return 0
 
 
