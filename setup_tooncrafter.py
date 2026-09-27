@@ -11,6 +11,7 @@ from setup_engine_common import (
     choose_torch_cuda_variant,
     ensure_repo,
     ensure_venv,
+    install_optional_xformers,
     installed_torch_cuda,
     run,
     validate_cuda_runtime,
@@ -86,11 +87,11 @@ def install_requirements(python: Path) -> tuple[str, str]:
         index,
     ]
     run(command)
-    run([python, "-m", "pip", "install", "xformers==0.0.22.post7"])
     run([python, "-m", "pip", "install", "-r", _filtered_requirements()])
     run([python, "-m", "pip", "install", "huggingface_hub>=0.25,<1"])
-    run([python, "-m", "pip", "check"])
     validate_cuda_runtime(python, expected_cuda)
+    install_optional_xformers(python, "0.0.22.post7")
+    run([python, "-m", "pip", "check"])
     return variant, expected_cuda
 
 
@@ -123,7 +124,6 @@ import einops
 import omegaconf
 import pytorch_lightning
 import transformers
-import xformers
 
 source = Path({str(SOURCE)!r})
 checkpoint = Path({str(checkpoint)!r})
@@ -141,6 +141,11 @@ assert isinstance(state, dict) and state, 'ToonCrafter checkpoint is empty or in
 del state
 print('ToonCrafter runtime imports: ok')
 print('ToonCrafter checkpoint CPU load: ok')
+try:
+    import xformers
+    print('ToonCrafter attention: xFormers enabled')
+except Exception:
+    print('ToonCrafter attention: PyTorch fallback')
 """
     run([python, "-c", code])
 
