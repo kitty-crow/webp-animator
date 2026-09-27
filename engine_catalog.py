@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from typing import Any
 
 
@@ -78,6 +79,18 @@ ENGINE_REGISTRY: tuple[dict[str, Any], ...] = (
 )
 
 
+def _app_all_module():
+    module = sys.modules.get("app_all")
+    if module is not None:
+        return module
+
+    # `python app_all.py` registers the running application as __main__, not
+    # `app_all`. Most local deployments use exactly that form.
+    module = sys.modules.get("__main__")
+    filename = Path(str(getattr(module, "__file__", ""))).name.lower() if module else ""
+    return module if filename == "app_all.py" else None
+
+
 def catalog_from_status(state: dict[str, Any]) -> list[dict[str, Any]]:
     catalog: list[dict[str, Any]] = []
     for definition in ENGINE_REGISTRY:
@@ -92,7 +105,13 @@ def catalog_from_status(state: dict[str, Any]) -> list[dict[str, Any]]:
         if runtime.get("error"):
             entry["error"] = str(runtime["error"])
         catalog.append(entry)
-    catalog.sort(key=lambda item: (str(item.get("role", "")), int(item.get("order", 0)), str(item.get("label", ""))))
+    catalog.sort(
+        key=lambda item: (
+            str(item.get("role", "")),
+            int(item.get("order", 0)),
+            str(item.get("label", "")),
+        )
+    )
     return catalog
 
 
@@ -104,7 +123,7 @@ def decorate_status(state: dict[str, Any]) -> dict[str, Any]:
 
 def install_status_endpoint() -> None:
     """Decorate app_all's /engine-status payload with the central engine catalog."""
-    app_all = sys.modules.get("app_all")
+    app_all = _app_all_module()
     if app_all is None or not hasattr(app_all, "engine_status"):
         return
 
