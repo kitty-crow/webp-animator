@@ -173,17 +173,19 @@ def install_model(python: Path):
 
 def validate_runtime(python: Path):
     code = f"""
-import os
+import gc
 import sys
 from pathlib import Path
 import torch
-source = Path({str(RIFE_DIR)!r})
-model_dir = Path({str(MODEL_DIR)!r})
-os.chdir(source)
-sys.path.insert(0, str(source))
-assert (model_dir / 'flownet.pkl').is_file()
-from model.RIFE import Model
-print('RIFE runtime import: ok')
+root = Path({str(ROOT)!r})
+sys.path.insert(0, str(root))
+import rife_worker
+torch_module, model = rife_worker.load_model(Path({str(RIFE_DIR)!r}), Path({str(MODEL_DIR)!r}))
+assert torch.cuda.is_available(), 'RIFE preflight lost CUDA after model load'
+print('RIFE model load: ok')
+del model
+gc.collect()
+torch.cuda.empty_cache()
 """
     run([python, "-c", code])
 
@@ -202,7 +204,7 @@ def main():
     print(f"RIFE source: {RIFE_DIR}")
     print(f"RIFE model:  {MODEL_DIR}")
     print(f"CUDA:        {cuda_variant} / PyTorch runtime {expected_cuda}")
-    print("Runtime preflight: CUDA and RIFE import passed.")
+    print("Runtime preflight: CUDA and actual RIFE model load passed.")
     print("Restart app_all.py if it is already running.")
 
 
