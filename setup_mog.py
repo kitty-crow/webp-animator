@@ -111,7 +111,18 @@ def install_requirements(python: Path) -> tuple[str, str]:
     run([python, "-m", "pip", "uninstall", "-y", "cupy-cuda11x", "cupy-cuda12x"], check=False)
     run([python, "-m", "pip", "install", cupy_package])
     run([python, "-m", "pip", "install", "-r", _filtered_requirements()])
-    run([python, "-m", "pip", "install", "gdown", "huggingface_hub>=0.25,<1"])
+    # Accelerate is used by WebP Animator to stream the heavy diffusion model from
+    # RAM, or memory-map it from disk, when the whole FP16 checkpoint cannot reside
+    # in VRAM. Install it explicitly rather than discovering it during a render.
+    run([
+        python,
+        "-m",
+        "pip",
+        "install",
+        "gdown",
+        "huggingface_hub>=0.25,<1",
+        "accelerate==0.25.0",
+    ])
     validate_cuda_runtime(python, expected_cuda, require_cupy=True)
     install_optional_xformers(python, "0.0.22.post7")
     run([python, "-m", "pip", "check"])
@@ -184,6 +195,7 @@ import einops
 import omegaconf
 import pytorch_lightning
 import transformers
+import accelerate
 
 source = Path({str(SOURCE)!r})
 os.chdir(source)
@@ -206,6 +218,7 @@ for raw in {repr([str(path) for path in checkpoints])}:
 print('MoG runtime imports: ok')
 print('MoG flow checkpoint CPU load: ok')
 print('MoG diffusion checkpoint CPU load: ok')
+print('MoG Accelerate:', accelerate.__version__)
 print('MoG CuPy devices:', cupy.cuda.runtime.getDeviceCount())
 try:
     import xformers
@@ -233,8 +246,8 @@ def main() -> None:
     print(f"Source: {SOURCE}")
     print(f"Installed variant(s): {', '.join(variants)}")
     print(f"CUDA: {cuda_variant} / PyTorch runtime {expected_cuda}")
-    print("Runtime preflight: CUDA, CuPy, imports and checkpoint CPU loads all passed.")
-    print("The released MoG checkpoints are very large. 4 GB GPUs may still fail during full model placement; the worker will report that as a hardware memory limit rather than an installation error.")
+    print("Runtime preflight: CUDA, CuPy, Accelerate, imports and checkpoint CPU loads all passed.")
+    print("Low-VRAM execution automatically uses RAM/disk model offload; run preflight_engines.py for real inference qualification.")
     print("Restart app_all.py if it is already running.")
 
 
