@@ -4,40 +4,56 @@ import sys
 
 
 UI_PATCH = r'''
-/* generative-models-ui-v3 */
+/* engine-catalog-ui-v4 */
 (() => {
   "use strict";
 
-  const models = [
-    ["resshift", "Generative · Multi-Input ResShift Diffusion"],
-    ["mog_ani", "Generative · MoG Animation"],
-    ["mog_real", "Generative · MoG Real-world"],
-    ["tooncrafter", "Generative · ToonCrafter (cartoon/anime)"],
-  ];
-
-  const hints = {
-    resshift: "Endpoint-constrained residual diffusion. More expensive than RIFE/AMT, but better suited to difficult occlusion, articulation and missing-content transitions.",
-    mog_ani: "Motion-aware generative interpolation tuned for animation. Very heavy; uses low-VRAM retries and may still exceed a 4 GB GPU.",
-    mog_real: "Motion-aware generative interpolation tuned for photographic/real-world frames. Very heavy; uses low-VRAM retries and may still exceed a 4 GB GPU.",
-    tooncrafter: "Generative cartoon interpolation from the two endpoint frames. Produces a full transition and selects the requested in-betweens from it. Extremely memory hungry on old GPUs.",
-  };
-  const conventionalHint = "Conventional temporal interpolation. Can work on all gaps, manual targets, automatic missing gaps, and the loop seam.";
   let engineState = null;
+  let attempts = 0;
 
-  function install() {
-    const select = document.getElementById("interpolator");
-    if (!select) return false;
+  function enginesFor(role) {
+    if (!engineState || !Array.isArray(engineState.engines)) return [];
+    return engineState.engines
+      .filter(engine => engine && engine.ready === true && engine.role === role)
+      .sort((left, right) =>
+        Number(left.order || 0) - Number(right.order || 0) ||
+        String(left.label || left.id || "").localeCompare(String(right.label || right.id || ""))
+      );
+  }
 
-    for (const [value, text] of models) {
-      let node = select.querySelector(`option[value="${value}"]`);
-      if (!node) {
-        node = document.createElement("option");
-        node.value = value;
-        select.append(node);
-      }
-      node.textContent = text;
+  function displayLabel(engine) {
+    const prefix = engine.generative ? "Generative · " : "";
+    return `${prefix}${engine.label || engine.id}`;
+  }
+
+  function populate(select, role) {
+    const previous = select.value;
+    const engines = enginesFor(role);
+    select.replaceChildren();
+
+    const none = document.createElement("option");
+    none.value = "none";
+    none.textContent = "None";
+    select.append(none);
+
+    for (const engine of engines) {
+      const option = document.createElement("option");
+      option.value = String(engine.id);
+      option.textContent = displayLabel(engine);
+      select.append(option);
     }
 
+    if ([...select.options].some(option => option.value === previous)) {
+      select.value = previous;
+    }
+  }
+
+  function selectedEngine(select) {
+    if (!select || !engineState || !Array.isArray(engineState.engines)) return null;
+    return engineState.engines.find(engine => engine && engine.id === select.value) || null;
+  }
+
+  function bindHint(select, fallback) {
     const label = select.closest("label.option");
     let hint = label?.querySelector(".hint");
     if (!hint && label) {
@@ -46,54 +62,73 @@ UI_PATCH = r'''
       label.append(hint);
     }
 
-    function updateHint() {
+    const update = () => {
       if (!hint) return;
-      const value = select.value;
-      hint.textContent = hints[value] || conventionalHint;
-      const vram = Number(engineState?.acceleration?.total_vram?.[0] || 0);
-      if (vram > 0 && vram < 6 * 1024 ** 3 && ["mog_ani", "mog_real", "tooncrafter"].includes(value)) {
-        hint.textContent += " This GPU has under 6 GB VRAM, so the model may fail even after reduced-resolution/offload fallbacks.";
+      const engine = selectedEngine(select);
+      hint.textContent = engine?.hint || fallback;
+      const warningGb = Number(engine?.low_vram_warning_gb || 0);
+      const vramBytes = Number(engineState?.acceleration?.total_vram?.[0] || 0);
+      if (warningGb > 0 && vramBytes > 0 && vramBytes < warningGb * 1024 ** 3) {
+        hint.textContent += ` This GPU has under ${warningGb} GB VRAM, so the model may fail even after reduced-resolution/offload fallbacks.`;
       }
+    };
+
+    if (select.dataset.engineCatalogBound !== "1") {
+      select.dataset.engineCatalogBound = "1";
+      select.addEventListener("change", update);
     }
+    update();
+  }
 
-    if (select.dataset.generativeModelsBound !== "1") {
-      select.dataset.generativeModelsBound = "1";
-      select.addEventListener("change", updateHint);
-    }
-    updateHint();
+  function updateStatus() {
+    const status = document.getElementById("rifeStatus");
+    if (!status || !engineState || !Array.isArray(engineState.engines)) return;
+    const available = engineState.engines.filter(engine => engine?.ready === true);
+    status.textContent = available.length
+      ? `Available engines: ${available.map(engine => engine.label || engine.id).join(" · ")}`
+      : "No optional engines detected";
+  }
 
-    fetch("/engine-status", { cache: "no-store" })
-      .then(response => response.ok ? response.json() : null)
-      .then(state => {
-        if (!state) return;
-        engineState = state;
-        updateHint();
-        const status = document.getElementById("rifeStatus");
-        if (!status) return;
-        const extra = [
-          `ResShift ${state.resshift?.ready ? "✓" : "missing"}`,
-          `MoG Ani ${state.mog_ani?.ready ? "✓" : "missing"}`,
-          `MoG Real ${state.mog_real?.ready ? "✓" : "missing"}`,
-          `ToonCrafter ${state.tooncrafter?.ready ? "✓" : "missing"}`,
-        ];
-        const base = status.textContent.split(" · ResShift ")[0];
-        status.textContent = `${base} · ${extra.join(" · ")}`;
-      })
-      .catch(() => {});
+  function install() {
+    if (!engineState) return false;
+    const interpolator = document.getElementById("interpolator");
+    const generator = document.getElementById("frameGenerator");
+    if (!interpolator || !generator) return false;
 
+    populate(interpolator, "interpolator");
+    populate(generator, "generator");
+    bindHint(
+      interpolator,
+      "Select an installed interpolation engine for all gaps, manual targets, automatic missing gaps, or the loop seam.",
+    );
+    bindHint(
+      generator,
+      "Select an installed structural frame generator. It can be combined with an interpolator for further filling.",
+    );
+    updateStatus();
+
+    document.dispatchEvent(new CustomEvent("webp-engine-catalog-ready", { detail: engineState }));
     return true;
   }
 
-  if (install()) return;
-
-  // advanced-ui.js creates the Interpolator selector dynamically. Do not depend on
-  // script execution order: wait for it to exist and then install the generative
-  // choices. This also makes the UI resilient to browser caching/reload timing.
-  let attempts = 0;
-  const timer = setInterval(() => {
+  function retryInstall() {
     attempts += 1;
-    if (install() || attempts >= 100) clearInterval(timer);
-  }, 50);
+    if (install() || attempts >= 200) return;
+    setTimeout(retryInstall, 50);
+  }
+
+  fetch("/engine-status", { cache: "no-store" })
+    .then(response => {
+      if (!response.ok) throw new Error(`engine status failed (${response.status})`);
+      return response.json();
+    })
+    .then(state => {
+      engineState = state;
+      retryInstall();
+    })
+    .catch(error => {
+      console.error("Could not load WebP Animator engine catalog", error);
+    });
 })();
 '''.strip()
 
@@ -103,20 +138,20 @@ def install_ui_patch() -> None:
     if app_all is None:
         return
 
-    marker = b"/* generative-models-ui-v3 */"
+    marker = b"/* engine-catalog-ui-v4 */"
 
-    # Keep a fallback copy in /advanced-ui.js for direct consumers of that script.
+    # app_all serves this script directly. Appending the catalog bootstrap here also
+    # keeps direct /advanced-ui.js consumers in sync with the runtime engine registry.
     if hasattr(app_all, "ADVANCED_SCRIPT") and marker not in bytes(app_all.ADVANCED_SCRIPT):
         app_all.ADVANCED_SCRIPT = bytes(app_all.ADVANCED_SCRIPT) + b"\n\n" + UI_PATCH.encode("utf-8") + b"\n"
 
-    # More importantly, put the bootstrap directly in the served HTML. The base
-    # advanced script is commonly cached by browsers on this local app, while the
-    # HTML bootstrap retries until advanced-ui.js has created #interpolator.
+    # app_all's HTML gets a cache-busted advanced script plus an inline bootstrap so
+    # selector discovery is independent of script execution order.
     if hasattr(app_all, "INDEX_HTML"):
         html = bytes(app_all.INDEX_HTML)
         html = html.replace(
             b'/advanced-ui.js"',
-            b'/advanced-ui.js?v=generative-models-v3"',
+            b'/advanced-ui.js?v=engine-catalog-v4"',
         )
         if marker not in html:
             inline = b"\n<script>\n" + UI_PATCH.encode("utf-8") + b"\n</script>\n"
