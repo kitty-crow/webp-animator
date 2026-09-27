@@ -41,13 +41,9 @@ ENGINE_REGISTRY: tuple[dict[str, Any], ...] = (
         "id": "mog_ani",
         "role": "interpolator",
         "label": "MoG Animation",
-        "hint": "Motion-aware generative interpolation tuned for animation.",
+        "hint": "Motion-aware generative interpolation tuned for animation. On low-VRAM GPUs the model streams weights from system RAM, or memory-mapped disk if RAM is tight; this is much slower but avoids requiring the whole model in VRAM.",
         "generative": True,
         "requires_cuda": True,
-        # The FP16 diffusion model itself cannot be placed on a 4 GB card. This is
-        # independent of render resolution, so do not offer a control that can only
-        # fail later during model.to(cuda).
-        "minimum_vram_gb": 5.0,
         "order": 40,
         "low_vram_warning_gb": 6,
     },
@@ -55,10 +51,9 @@ ENGINE_REGISTRY: tuple[dict[str, Any], ...] = (
         "id": "mog_real",
         "role": "interpolator",
         "label": "MoG Real-world",
-        "hint": "Motion-aware generative interpolation tuned for photographic and real-world footage.",
+        "hint": "Motion-aware generative interpolation tuned for photographic and real-world footage. On low-VRAM GPUs the model streams weights from system RAM, or memory-mapped disk if RAM is tight; this is much slower but avoids requiring the whole model in VRAM.",
         "generative": True,
         "requires_cuda": True,
-        "minimum_vram_gb": 5.0,
         "order": 50,
         "low_vram_warning_gb": 6,
     },
@@ -66,12 +61,9 @@ ENGINE_REGISTRY: tuple[dict[str, Any], ...] = (
         "id": "tooncrafter",
         "role": "interpolator",
         "label": "ToonCrafter (cartoon/anime)",
-        "hint": "Generative cartoon interpolation that creates a transition from the two endpoint frames and selects the requested in-betweens.",
+        "hint": "Generative cartoon interpolation that creates a transition from the two endpoint frames and selects the requested in-betweens. Low-VRAM execution may use RAM/disk model offload and will be substantially slower.",
         "generative": True,
         "requires_cuda": True,
-        # ToonCrafter's diffusion core has the same class of placement floor as MoG.
-        # Reduced output resolution helps activations, not the resident model weights.
-        "minimum_vram_gb": 5.0,
         "order": 60,
         "low_vram_warning_gb": 6,
     },
@@ -191,8 +183,6 @@ def _app_all_module():
     if module is not None:
         return module
 
-    # `python app_all.py` registers the running application as __main__, not
-    # `app_all`. Most local deployments use exactly that form.
     module = sys.modules.get("__main__")
     filename = Path(str(getattr(module, "__file__", ""))).name.lower() if module else ""
     return module if filename == "app_all.py" else None
@@ -215,17 +205,6 @@ def catalog_from_status(state: dict[str, Any]) -> list[dict[str, Any]]:
             if not bool(probe.get("ready", False)):
                 entry["ready"] = False
                 entry["error"] = str(probe.get("error") or "CUDA runtime is not usable in this engine environment.")
-            else:
-                minimum_gb = float(definition.get("minimum_vram_gb", 0) or 0)
-                total_vram = int(probe.get("total_vram", 0) or 0)
-                if minimum_gb > 0 and total_vram > 0 and total_vram < minimum_gb * 1024**3:
-                    actual_gb = total_vram / 1024**3
-                    entry["ready"] = False
-                    entry["error"] = (
-                        f"{entry.get('label', engine_id)} needs more VRAM for model placement "
-                        f"than this GPU provides ({actual_gb:.1f} GB detected; "
-                        f"{minimum_gb:.1f} GB minimum configured)."
-                    )
 
         if runtime.get("setup"):
             entry["setup"] = str(runtime["setup"])
@@ -247,9 +226,6 @@ def decorate_status(state: dict[str, Any]) -> dict[str, Any]:
     catalog = catalog_from_status(value)
     value["engines"] = catalog
 
-    # Keep the legacy top-level status entries aligned with the catalogue. Older UI
-    # code still checks state[engine].ready directly, so a CUDA-broken environment
-    # must not be selectable there while the catalogue correctly says it is unusable.
     for entry in catalog:
         engine_id = str(entry.get("id", ""))
         if not engine_id:
