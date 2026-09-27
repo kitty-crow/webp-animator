@@ -30,6 +30,10 @@ CUDA_VARIANTS = {
     },
 }
 
+RUNTIME_REQUIREMENTS = (
+    "safetensors>=0.4.3",
+)
+
 
 def choose_python() -> str:
     explicit = os.environ.get("RESSHIFT_BOOTSTRAP_PYTHON")
@@ -88,12 +92,8 @@ def choose_cuda_variant() -> tuple[str, str, str]:
         variant = _variant_from_index(explicit_index) or "cu118"
     else:
         driver = _driver_cuda_version()
-        # CUDA 11.x drivers are the important compatibility case for Pascal-era
-        # laptops. PyTorch 2.6 still publishes cu118 wheels and upstream explicitly
-        # supports cupy-cuda11x, so prefer that stack instead of forcing CUDA 12.4.
         variant = "cu118" if driver and driver[0] < 12 else "cu124"
         if driver is None:
-            # cu118 is the broadest default for the GPUs this project supports.
             variant = "cu118"
 
     metadata = CUDA_VARIANTS[variant]
@@ -141,6 +141,59 @@ def _validate_cuda_stack(python: Path, expected_cuda: str) -> None:
     run([python, "-c", code])
 
 
+def _download_model(python: Path) -> None:
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    code = (
+        "from huggingface_hub import snapshot_download; "
+        f"snapshot_download(repo_id={MODEL_REPOSITORY!r}, local_dir={str(MODEL_DIR)!r})"
+    )
+    run([python, "-c", code])
+
+
+def _validate_runtime(python: Path) -> None:
+    """Exercise the actual runtime dependency graph before setup reports success."""
+    code = f"""
+import gc
+import os
+import sys
+from pathlib import Path
+
+import cupy
+import kornia
+import numpy
+import safetensors
+import torch
+from PIL import Image
+
+source = Path({str(SOURCE)!r})
+model_dir = Path({str(MODEL_DIR)!r})
+os.chdir(source)
+sys.path.insert(0, str(source))
+
+from model.hub import MultiInputResShiftHub
+from modules.cupy_module.nedt import NEDT
+
+print('ResShift runtime imports: ok')
+model = MultiInputResShiftHub.from_pretrained(str(model_dir))
+print('ResShift checkpoint load: ok')
+
+model = model.to('cuda').eval().requires_grad_(False)
+torch.cuda.synchronize()
+print('ResShift CUDA model placement: ok')
+
+probe = torch.zeros((1, 3, 16, 16), device='cuda', dtype=torch.float32)
+with torch.inference_mode():
+    result = NEDT().to('cuda')(probe)
+torch.cuda.synchronize()
+print('ResShift CuPy/NVRTC kernel: ok', tuple(result.shape))
+
+del result, probe, model
+gc.collect()
+torch.cuda.empty_cache()
+"""
+    run([python, "-c", code])
+
+
 def main() -> None:
     print("Installing Multi-Input ResShift Diffusion VFI")
     ensure_repo(REPOSITORY, SOURCE)
@@ -154,16 +207,8 @@ def main() -> None:
     print(f"PyTorch index: {torch_index}")
     print(f"CuPy package: {cupy_package}")
 
-    # A same-version cu124 torch installation satisfies `torch==2.6.0`, so pip
-    # will not necessarily replace it with cu118 unless we explicitly force the
-    # reinstall when the selected CUDA runtime changes.
     current_cuda = _installed_torch_cuda(python)
-    torch_command = [
-        python,
-        "-m",
-        "pip",
-        "install",
-    ]
+    torch_command = [python, "-m", "pip", "install"]
     if current_cuda != expected_cuda:
         torch_command.append("--force-reinstall")
     torch_command += [
@@ -174,9 +219,6 @@ def main() -> None:
     ]
     run(torch_command)
 
-    # Upstream pins cupy-cuda12x in requirements.txt but explicitly documents
-    # cupy-cuda11x for CUDA 11.x. Install the matching wheel ourselves and prevent
-    # the later requirements pass from silently reintroducing the wrong runtime.
     run([
         python,
         "-m",
@@ -188,21 +230,19 @@ def main() -> None:
     ], check=False)
     run([python, "-m", "pip", "install", cupy_package])
     run([python, "-m", "pip", "install", "-r", _filtered_requirements()])
+    run([python, "-m", "pip", "install", *RUNTIME_REQUIREMENTS])
+    run([python, "-m", "pip", "check"])
 
     _validate_cuda_stack(python, expected_cuda)
-
-    MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    code = (
-        "from huggingface_hub import snapshot_download; "
-        f"snapshot_download(repo_id={MODEL_REPOSITORY!r}, local_dir={str(MODEL_DIR)!r})"
-    )
-    run([python, "-c", code])
+    _download_model(python)
+    _validate_runtime(python)
 
     print("\nResShift setup complete.")
     print(f"Python: {python}")
     print(f"Source: {SOURCE}")
     print(f"Model:  {MODEL_DIR}")
     print(f"CUDA:   {variant} / PyTorch runtime {expected_cuda}")
+    print("Runtime preflight: imports, checkpoint load, CUDA placement and CuPy kernel all passed.")
     print("Restart app_all.py if it is already running.")
 
 
