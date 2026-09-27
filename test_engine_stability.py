@@ -7,6 +7,7 @@ from unittest import mock
 import engine_catalog
 import generative_pipeline_bridge
 import generative_vfi
+import model_offload
 import setup_engine_common
 import tooncrafter_vfi
 
@@ -111,6 +112,22 @@ class EngineStabilityTests(unittest.TestCase):
         self.assertFalse(decorated["rife"]["ready"])
         self.assertEqual(decorated["rife"]["error"], "driver mismatch")
         self.assertTrue(decorated["amt"]["ready"])
+
+    def test_meta_offload_guard_prevents_legacy_module_to_from_copying_meta(self):
+        try:
+            import torch
+        except Exception as exc:
+            self.skipTest(f"torch unavailable in test environment: {exc}")
+
+        layer = torch.nn.Linear(4, 4, device="meta")
+        self.assertTrue(model_offload._module_has_meta_state(layer))
+        guarded = model_offload._guard_meta_module_moves(layer)
+        self.assertGreaterEqual(guarded, 1)
+        # A normal Module.to('cuda') on a meta parameter raises because meta has no
+        # backing storage. Once a module is Accelerate-managed, that relocation is
+        # redundant: the forward hook streams the real weight to its execution device.
+        self.assertIs(layer.to(torch.device("cuda")), layer)
+        self.assertEqual(next(layer.parameters()).device.type, "meta")
 
 
 if __name__ == "__main__":
