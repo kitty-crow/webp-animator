@@ -4,7 +4,6 @@ from __future__ import annotations
 import os
 import shutil
 import sys
-import tempfile
 from pathlib import Path
 
 from setup_engine_common import (
@@ -88,7 +87,17 @@ def install_requirements(python: Path) -> tuple[str, str]:
     ]
     run(command)
     run([python, "-m", "pip", "install", "-r", _filtered_requirements()])
-    run([python, "-m", "pip", "install", "huggingface_hub>=0.25,<1"])
+    # Accelerate provides layer-wise RAM/disk streaming when ToonCrafter cannot fit
+    # wholly in VRAM. Install it during setup so the first real render never has to
+    # mutate the environment.
+    run([
+        python,
+        "-m",
+        "pip",
+        "install",
+        "huggingface_hub>=0.25,<1",
+        "accelerate==0.25.0",
+    ])
     validate_cuda_runtime(python, expected_cuda)
     install_optional_xformers(python, "0.0.22.post7")
     run([python, "-m", "pip", "check"])
@@ -124,6 +133,7 @@ import einops
 import omegaconf
 import pytorch_lightning
 import transformers
+import accelerate
 
 source = Path({str(SOURCE)!r})
 checkpoint = Path({str(checkpoint)!r})
@@ -141,6 +151,7 @@ assert isinstance(state, dict) and state, 'ToonCrafter checkpoint is empty or in
 del state
 print('ToonCrafter runtime imports: ok')
 print('ToonCrafter checkpoint CPU load: ok')
+print('ToonCrafter Accelerate:', accelerate.__version__)
 try:
     import xformers
     print('ToonCrafter attention: xFormers enabled')
@@ -163,8 +174,8 @@ def main() -> None:
     print(f"Source:     {SOURCE}")
     print(f"Checkpoint: {checkpoint}")
     print(f"CUDA:       {cuda_variant} / PyTorch runtime {expected_cuda}")
-    print("Runtime preflight: CUDA, imports and checkpoint CPU load all passed.")
-    print("The official model targets 512x320 and is very memory hungry. The WebP worker uses FP16, component offload and reduced-resolution retries, but 4 GB GPUs may still be below the practical floor.")
+    print("Runtime preflight: CUDA, Accelerate, imports and checkpoint CPU load all passed.")
+    print("Low-VRAM execution automatically uses RAM/disk model offload; run preflight_engines.py for real inference qualification.")
     print("Restart app_all.py if it is already running.")
 
 
