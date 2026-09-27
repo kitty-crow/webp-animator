@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -100,41 +102,105 @@ def mog_paths(variant: str):
     return ready, python, source, config, checkpoint, flow_checkpoint
 
 
+def _nvidia_smi_status() -> dict | None:
+    executable = shutil.which("nvidia-smi")
+    if not executable:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                executable,
+                "--query-gpu=name,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return None
+
+    devices: list[str] = []
+    total_vram: list[int | None] = []
+    for raw in result.stdout.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        name, separator, memory = line.rpartition(",")
+        if not separator:
+            devices.append(line)
+            total_vram.append(None)
+            continue
+        devices.append(name.strip())
+        try:
+            # nvidia-smi reports MiB when nounits is requested.
+            total_vram.append(int(float(memory.strip()) * 1024**2))
+        except ValueError:
+            total_vram.append(None)
+
+    if not devices:
+        return None
+    return {
+        "torch": False,
+        "cuda": True,
+        "device": devices[0],
+        "device_count": len(devices),
+        "devices": devices,
+        "total_vram": total_vram,
+        "version": None,
+        "detected_by": "nvidia-smi",
+    }
+
+
 def acceleration_status() -> dict:
+    torch_error = None
     try:
         import torch
 
         cuda = bool(torch.cuda.is_available())
-        device_name = torch.cuda.get_device_name(0) if cuda else None
-        device_count = int(torch.cuda.device_count()) if cuda else 0
-        devices = [torch.cuda.get_device_name(index) for index in range(device_count)] if cuda else []
-        total_vram = []
         if cuda:
+            device_count = int(torch.cuda.device_count())
+            devices = [torch.cuda.get_device_name(index) for index in range(device_count)]
+            total_vram = []
             for index in range(device_count):
                 try:
                     total_vram.append(int(torch.cuda.get_device_properties(index).total_memory))
                 except Exception:
                     total_vram.append(None)
-        return {
-            "torch": True,
-            "cuda": cuda,
-            "device": device_name,
-            "device_count": device_count,
-            "devices": devices,
-            "total_vram": total_vram,
-            "version": str(torch.__version__),
-        }
+            return {
+                "torch": True,
+                "cuda": True,
+                "device": devices[0] if devices else None,
+                "device_count": device_count,
+                "devices": devices,
+                "total_vram": total_vram,
+                "version": str(torch.__version__),
+                "detected_by": "torch",
+            }
+        torch_error = "PyTorch is installed in the main app but reports no CUDA device."
     except Exception as exc:
-        return {
-            "torch": False,
-            "cuda": False,
-            "device": None,
-            "device_count": 0,
-            "devices": [],
-            "total_vram": [],
-            "version": None,
-            "error": str(exc),
-        }
+        torch_error = str(exc)
+
+    # The lightweight web-app environment intentionally does not require PyTorch.
+    # Detect physical NVIDIA devices through the driver instead so dual-GPU sharding
+    # still works when CUDA lives only inside the isolated engine environments.
+    smi = _nvidia_smi_status()
+    if smi is not None:
+        if torch_error:
+            smi["torch_error"] = torch_error
+        return smi
+
+    return {
+        "torch": False,
+        "cuda": False,
+        "device": None,
+        "device_count": 0,
+        "devices": [],
+        "total_vram": [],
+        "version": None,
+        "error": torch_error or "No CUDA-capable NVIDIA device was detected.",
+    }
 
 
 def engine_status(legacy=None) -> dict:
