@@ -24,6 +24,11 @@ class EngineStabilityTests(unittest.TestCase):
             self.assertTrue(definition["generative"])
             self.assertTrue(definition["requires_cuda"])
 
+    def test_rife_is_also_runtime_cuda_guarded(self):
+        definition = engine_catalog.engine_definition("rife")
+        self.assertIsNotNone(definition)
+        self.assertTrue(definition["requires_cuda"])
+
     def test_legacy_marker_resolves_to_real_engine_before_dispatch(self):
         for engine, marker in generative_vfi.MARKERS.items():
             settings = {
@@ -89,6 +94,23 @@ class EngineStabilityTests(unittest.TestCase):
         # AMT has a CPU path, so a missing CUDA runtime must not make the engine
         # disappear from the catalogue entirely.
         self.assertTrue(by_id["amt"]["ready"])
+
+    def test_decorated_top_level_readiness_matches_catalogue(self):
+        state = {
+            "rife": {"ready": True, "python": "fake-python"},
+            "amt": {"ready": True, "python": "fake-python"},
+        }
+        with mock.patch.object(
+            engine_catalog,
+            "_cuda_runtime_probe",
+            return_value={"ready": False, "error": "driver mismatch"},
+        ):
+            decorated = engine_catalog.decorate_status(state)
+        by_id = {entry["id"]: entry for entry in decorated["engines"]}
+        self.assertFalse(by_id["rife"]["ready"])
+        self.assertFalse(decorated["rife"]["ready"])
+        self.assertEqual(decorated["rife"]["error"], "driver mismatch")
+        self.assertTrue(decorated["amt"]["ready"])
 
 
 if __name__ == "__main__":
