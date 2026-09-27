@@ -153,3 +153,52 @@ def validate_cuda_runtime(python: Path, expected_prefix: str, *, require_cupy: b
         + cupy_probe
     )
     run([python, "-c", code])
+
+
+def install_optional_xformers(python: Path, version: str = "0.0.22.post7") -> bool:
+    """Install xFormers only when its actual attention kernel works on this GPU.
+
+    Several upstream video-diffusion repos switch to xFormers merely because it can
+    be imported. On older Pascal GPUs a wheel can import successfully yet have no
+    memory-efficient-attention kernel for the device, which causes inference to fail
+    much later. Exercise the exact operation now; when unsupported, uninstall the
+    optional package so upstream's built-in ordinary-PyTorch attention fallback is
+    selected instead.
+    """
+    completed = run(
+        [python, "-m", "pip", "install", f"xformers=={version}"],
+        check=False,
+    )
+    if completed.returncode != 0:
+        print("WARNING: xFormers could not be installed; using ordinary PyTorch attention.")
+        return False
+
+    probe = subprocess.run(
+        [
+            str(python),
+            "-c",
+            (
+                "import torch, xformers.ops; "
+                "assert torch.cuda.is_available(); "
+                "q=torch.randn((2,16,32),device='cuda',dtype=torch.float16); "
+                "y=xformers.ops.memory_efficient_attention(q,q,q); "
+                "torch.cuda.synchronize(); "
+                "print('xFormers attention kernel: ok', tuple(y.shape))"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if probe.returncode == 0:
+        if probe.stdout.strip():
+            print(probe.stdout.strip())
+        return True
+
+    details = (probe.stderr or probe.stdout or "no compatible attention kernel").strip()
+    print("WARNING: xFormers imports but cannot execute memory-efficient attention on this GPU.")
+    if details:
+        print(details[-1200:])
+    run([python, "-m", "pip", "uninstall", "-y", "xformers"], check=False)
+    print("Using upstream's ordinary PyTorch attention fallback instead.")
+    return False
