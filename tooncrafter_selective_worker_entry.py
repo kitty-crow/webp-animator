@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import gc
+
 import tooncrafter_selective_worker as implementation
 from model_offload import apply_model_offload
 
@@ -48,7 +50,7 @@ def _move_core_offloaded(model, device):
     current_mode = getattr(model, "_webp_offload_mode", None)
 
     # RAM/disk hooks already load each layer onto CUDA only for the forward that
-    # needs it, then evict it again. A later request to "move core to CPU" before
+    # needs it, then evict it again. A later request to move the core to CPU before
     # VAE decode therefore requires no full-model transfer.
     if current_mode in {"cpu", "disk"}:
         return model
@@ -61,13 +63,21 @@ def _move_core_offloaded(model, device):
     if source is None or checkpoint is None:
         return _original_move_core(model, target)
 
-    # Auxiliaries are already staged separately by the ToonCrafter worker. Keep
-    # them out of the offload hook graph so VAE/text/image components can still be
-    # moved independently at their existing call sites.
+    # Auxiliaries are staged separately by the ToonCrafter worker. Keep them out of
+    # the offload graph so VAE/text/image components retain their existing explicit
+    # lifecycle. The training-time EMA shadow is not used by this inference path and
+    # would otherwise roughly duplicate the denoiser's host/disk footprint.
     auxiliaries = implementation._auxiliary_modules(model)
     for name, module in auxiliaries.items():
         if module is not None:
             setattr(model, name, None)
+
+    if getattr(model, "model_ema", None) is not None:
+        model.model_ema = None
+        if hasattr(model, "use_ema"):
+            model.use_ema = False
+        gc.collect()
+
     try:
         model, _mode, _stats = apply_model_offload(
             model,
