@@ -4,6 +4,8 @@ import ctypes
 import gc
 import os
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -118,14 +120,7 @@ def _sync_execution_device(model, device) -> None:
 
 
 def _stage_buffers(model, device) -> int:
-    """Keep registered buffers on CUDA because MoG samplers read them directly.
-
-    Accelerate can stream parameters safely through hooks, but MoG/ToonCrafter also
-    access diffusion schedule buffers outside module.forward(). Leaving those on
-    meta/CPU would produce device errors. EMA shadow copies are detached by the
-    engine wrappers before this helper is called, so the remaining buffers are the
-    small runtime schedules/normalisation state we actually need.
-    """
+    """Keep registered buffers on CUDA because the samplers read them directly."""
     moved = 0
     for module in model.modules():
         for name, value in list(module._buffers.items()):
@@ -140,8 +135,31 @@ def _stage_buffers(model, device) -> int:
     return moved
 
 
+def _ensure_accelerate():
+    try:
+        from accelerate import cpu_offload, disk_offload
+        return cpu_offload, disk_offload
+    except Exception:
+        # These research-model environments existed before model streaming was added.
+        # Make old installs self-heal instead of forcing another round of manual venv
+        # surgery. A clean setup should still install Accelerate explicitly later.
+        print("MODEL_OFFLOAD installing Hugging Face Accelerate support once", flush=True)
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "accelerate==0.25.0"],
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                "RAM/disk model offload requires Hugging Face Accelerate. Automatic "
+                "installation failed; run this engine's setup again or install "
+                "accelerate==0.25.0 in its isolated environment."
+            )
+        from accelerate import cpu_offload, disk_offload
+        return cpu_offload, disk_offload
+
+
 def _disk_offload(model, device, *, source: Path, checkpoint: Path, namespace: str, stats: dict[str, Any]):
-    from accelerate import disk_offload
+    _cpu_offload, disk_offload = _ensure_accelerate()
 
     explicit = os.environ.get(f"{namespace.upper()}_OFFLOAD_DIR", "").strip()
     offload_root = Path(explicit).expanduser().resolve() if explicit else source / "_webp_offload" / checkpoint.stem
@@ -189,14 +207,7 @@ def apply_model_offload(
         model = model.to(device)
         buffer_bytes = 0
     else:
-        try:
-            from accelerate import cpu_offload
-            from accelerate import disk_offload  # noqa: F401
-        except Exception as exc:
-            raise RuntimeError(
-                f"{namespace} selected {mode} offload but Hugging Face Accelerate is missing. "
-                f"Rerun this engine's setup script."
-            ) from exc
+        cpu_offload, _disk = _ensure_accelerate()
 
         if mode == "cpu":
             try:
