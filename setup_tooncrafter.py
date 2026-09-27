@@ -42,15 +42,9 @@ def install_requirements(python: Path) -> None:
         "--index-url",
         os.environ.get("TOONCRAFTER_TORCH_INDEX", "https://download.pytorch.org/whl/cu121"),
     ])
-    run([
-        python,
-        "-m",
-        "pip",
-        "install",
-        "xformers==0.0.22.post7",
-        "--index-url",
-        os.environ.get("TOONCRAFTER_TORCH_INDEX", "https://download.pytorch.org/whl/cu121"),
-    ])
+    # xformers is distributed on PyPI; using the PyTorch wheel index here makes pip
+    # report a false "no matching distribution" on Windows.
+    run([python, "-m", "pip", "install", "xformers==0.0.22.post7"])
 
     # Keep the upstream inference dependencies while avoiding packages the WebP
     # worker never imports. Torch/xformers are pinned above so their CUDA wheels stay
