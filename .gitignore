@@ -9,6 +9,7 @@ venv/
 .propainter-venv/
 .resshift-venv/
 .mog-venv/
+.tooncrafter-venv/
 third_party/
 .webp-jobs/
 .DS_Store
