@@ -29,7 +29,6 @@ def model_nbytes(model) -> int:
 
 
 def available_ram_bytes() -> int:
-    """Best-effort available physical RAM without adding a psutil dependency."""
     try:
         import psutil  # type: ignore
         return int(psutil.virtual_memory().available)
@@ -84,10 +83,16 @@ def choose_offload_mode(model, device, *, env_var: str) -> tuple[str, dict[str, 
 
     requested = _normalise_mode(os.environ.get(env_var, "auto"))
     weight_bytes = model_nbytes(model)
-    gpu_bytes = int(torch.cuda.get_device_properties(device).total_memory)
+    total_gpu = int(torch.cuda.get_device_properties(device).total_memory)
+    try:
+        free_gpu, _ = torch.cuda.mem_get_info(device)
+        free_gpu = int(free_gpu)
+    except Exception:
+        free_gpu = total_gpu
     ram_bytes = available_ram_bytes()
+
     gpu_margin = max(768 * 1024**2, int(weight_bytes * 0.25))
-    gpu_resident_ok = weight_bytes + gpu_margin <= gpu_bytes
+    gpu_resident_ok = weight_bytes + gpu_margin <= free_gpu
     ram_margin = max(2 * _GIB, int(weight_bytes * 0.35))
     cpu_offload_ok = ram_bytes <= 0 or weight_bytes + ram_margin <= ram_bytes
 
@@ -98,7 +103,8 @@ def choose_offload_mode(model, device, *, env_var: str) -> tuple[str, dict[str, 
 
     return mode, {
         "weights": weight_bytes,
-        "gpu": gpu_bytes,
+        "gpu": total_gpu,
+        "gpu_free": free_gpu,
         "ram_available": ram_bytes,
         "gpu_resident_ok": gpu_resident_ok,
         "cpu_offload_ok": cpu_offload_ok,
@@ -120,7 +126,6 @@ def _sync_execution_device(model, device) -> None:
 
 
 def _stage_buffers(model, device) -> int:
-    """Keep registered buffers on CUDA because the samplers read them directly."""
     moved = 0
     for module in model.modules():
         for name, value in list(module._buffers.items()):
@@ -140,9 +145,6 @@ def _ensure_accelerate():
         from accelerate import cpu_offload, disk_offload
         return cpu_offload, disk_offload
     except Exception:
-        # These research-model environments existed before model streaming was added.
-        # Make old installs self-heal instead of forcing another round of manual venv
-        # surgery. A clean setup should still install Accelerate explicitly later.
         print("MODEL_OFFLOAD installing Hugging Face Accelerate support once", flush=True)
         result = subprocess.run(
             [sys.executable, "-m", "pip", "install", "accelerate==0.25.0"],
@@ -190,17 +192,10 @@ def apply_model_offload(
     env_var: str,
     namespace: str,
 ):
-    """Place a model on GPU, stream it from RAM, or memory-map it from disk.
-
-    In CPU/disk modes Accelerate moves each parameter-owning module onto CUDA only
-    for the forward that needs it and evicts it afterwards. Disk mode memory-maps the
-    host weights, allowing execution even when neither VRAM nor physical RAM can hold
-    the full model at once. The largest individual layer plus its activations must
-    still fit on the GPU.
-    """
     mode, stats = choose_offload_mode(model, device, env_var=env_var)
     weight_gb = stats["weights"] / _GIB
     gpu_gb = stats["gpu"] / _GIB
+    free_gpu_gb = stats["gpu_free"] / _GIB
     ram_gb = stats["ram_available"] / _GIB if stats["ram_available"] else 0.0
 
     if mode == "gpu":
@@ -238,8 +233,8 @@ def apply_model_offload(
     setattr(model, "_webp_model_weight_bytes", int(stats["weights"]))
     print(
         f"{namespace.upper()}_OFFLOAD mode={mode} weights={weight_gb:.2f}GB "
-        f"gpu={gpu_gb:.2f}GB ram_available={ram_gb:.2f}GB "
-        f"cuda_buffers={buffer_bytes / 1024**2:.1f}MB",
+        f"gpu={gpu_gb:.2f}GB free={free_gpu_gb:.2f}GB "
+        f"ram_available={ram_gb:.2f}GB cuda_buffers={buffer_bytes / 1024**2:.1f}MB",
         flush=True,
     )
     return model, mode, stats
