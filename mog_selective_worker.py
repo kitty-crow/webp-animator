@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import gc
 import shutil
 
 import mog_selective_worker_v2 as implementation
@@ -48,17 +49,6 @@ def _ensure_flow_checkpoint(source, supplied):
 implementation._ensure_flow_checkpoint = _ensure_flow_checkpoint
 
 
-# Upstream EMA-VFI calls torch.load() without map_location while constructing its
-# motion model. Its published checkpoint contains CUDA storage tags, so that call
-# otherwise deserialises directly onto GPU before our staged/offload logic can run.
-# Force only unspecified torch.load calls to CPU during MoG model construction.
-#
-# More importantly, intercept the single top-level model.to(cuda) performed by the
-# legacy worker. If the full FP16 diffusion model cannot coexist with activation
-# headroom on the GPU, model_offload streams layers from RAM, or memory-maps them
-# from disk if physical RAM is tight. This is intentionally allowed to be slow: a
-# 4 GB card should degrade to transfer bandwidth, not fail merely because the whole
-# checkpoint cannot reside in VRAM at once.
 _original_load_model = implementation.load_model
 
 
@@ -77,21 +67,27 @@ def _load_model_offloaded(source, config_path, checkpoint, flow_checkpoint):
         return original_torch_load(*load_args, **load_kwargs)
 
     def routed_module_to(module, *to_args, **to_kwargs):
-        # Lightning's own .to() has already updated model.device before reaching
-        # torch.nn.Module.to, which is useful because upstream allocates sampling
-        # tensors via model.device even when Accelerate keeps parameters on meta/CPU.
+        # Lightning's .to() already updated model.device before this base method is
+        # reached, so upstream sampling code still sees cuda:0 while Accelerate keeps
+        # most parameters on RAM/disk between individual layer forwards.
         if not routed["done"]:
+            # MoG inference never enters ema_scope(), so the training-time EMA shadow
+            # is dead weight here. It is roughly another model-sized set of buffers.
+            # Drop it before deciding residency/offload and before staging buffers.
+            if getattr(module, "model_ema", None) is not None:
+                module.model_ema = None
+                if hasattr(module, "use_ema"):
+                    module.use_ema = False
+                gc.collect()
             try:
                 size = model_nbytes(module)
             except Exception:
                 size = 0
-            # The top-level MoG diffusion model is multi-GB. Ignore ordinary child
-            # module transfers (notably the separately staged optical-flow network).
             if size >= 512 * 1024**2:
                 routed["done"] = True
                 torch.nn.Module.to = original_module_to
                 try:
-                    placed, mode, _stats = apply_model_offload(
+                    placed, _mode, _stats = apply_model_offload(
                         module,
                         torch.device("cuda"),
                         source=source,
@@ -121,11 +117,7 @@ implementation.load_model = _load_model_offloaded
 
 # Accelerate CPU/disk offload leaves actual parameters on CPU/meta between calls.
 # The original helper inferred the input device from next(model.parameters()), which
-# is therefore no longer reliable. Lightning's model.device remains the intended
-# CUDA execution device; model_offload also stores it explicitly.
-_original_generate_clip = implementation._generate_clip
-
-
+# is therefore no longer reliable. Use the explicit execution device instead.
 def _generate_clip_offloaded(
     torch,
     model,
