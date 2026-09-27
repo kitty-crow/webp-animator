@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import os
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+from setup_engine_common import ensure_repo, ensure_venv, run
+
+ROOT = Path(__file__).resolve().parent
+SOURCE = ROOT / "third_party" / "ToonCrafter"
+VENV = ROOT / ".tooncrafter-venv"
+REPOSITORY = "https://github.com/Doubiiu/ToonCrafter.git"
+MODEL_REPOSITORY = "Doubiiu/ToonCrafter"
+
+
+def choose_python() -> str:
+    explicit = os.environ.get("TOONCRAFTER_BOOTSTRAP_PYTHON")
+    candidates = [explicit] if explicit else []
+    candidates += ["python3.10", "python3.9", "python3.8", sys.executable]
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        resolved = shutil.which(candidate) if not os.path.isabs(candidate) else candidate
+        if resolved and Path(resolved).is_file():
+            return str(resolved)
+    raise RuntimeError("Could not find Python 3.8-3.10 for the ToonCrafter environment.")
+
+
+def install_requirements(python: Path) -> None:
+    run([
+        python,
+        "-m",
+        "pip",
+        "install",
+        "torch==2.1.0+cu121",
+        "torchvision==0.16.0+cu121",
+        "--index-url",
+        os.environ.get("TOONCRAFTER_TORCH_INDEX", "https://download.pytorch.org/whl/cu121"),
+    ])
+    run([
+        python,
+        "-m",
+        "pip",
+        "install",
+        "xformers==0.0.22.post7",
+        "--index-url",
+        os.environ.get("TOONCRAFTER_TORCH_INDEX", "https://download.pytorch.org/whl/cu121"),
+    ])
+
+    # Keep the upstream inference dependencies while avoiding packages the WebP
+    # worker never imports. Torch/xformers are pinned above so their CUDA wheels stay
+    # internally consistent on Windows.
+    source_requirements = (SOURCE / "requirements.txt").read_text(encoding="utf-8")
+    kept = []
+    for raw in source_requirements.splitlines():
+        line = raw.strip()
+        lower = line.lower()
+        if not line:
+            continue
+        if lower.startswith("torch==") or lower == "torchvision" or lower.startswith("xformers"):
+            continue
+        if lower.startswith("gradio") or lower.startswith("moviepy") or lower == "av":
+            continue
+        kept.append(line)
+
+    with tempfile.TemporaryDirectory(prefix="tooncrafter_requirements_") as temp:
+        requirements = Path(temp) / "requirements-inference.txt"
+        requirements.write_text("\n".join(kept) + "\n", encoding="utf-8")
+        run([python, "-m", "pip", "install", "-r", requirements])
+
+    run([python, "-m", "pip", "install", "huggingface_hub>=0.25,<1"])
+
+
+def download_model(python: Path) -> Path:
+    checkpoint_dir = SOURCE / "checkpoints" / "tooncrafter_512_interp_v1"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    destination = checkpoint_dir / "model.ckpt"
+    if destination.is_file() and destination.stat().st_size > 1024 * 1024:
+        print(f"Already present: {destination}")
+        return destination
+    code = (
+        "from huggingface_hub import hf_hub_download; "
+        f"print(hf_hub_download(repo_id={MODEL_REPOSITORY!r}, filename='model.ckpt', "
+        f"local_dir={str(checkpoint_dir)!r}))"
+    )
+    run([python, "-c", code])
+    if not destination.is_file():
+        raise RuntimeError(f"ToonCrafter checkpoint download did not create {destination}")
+    return destination
+
+
+def main() -> None:
+    print("Installing ToonCrafter generative cartoon interpolation")
+    ensure_repo(REPOSITORY, SOURCE)
+    python = ensure_venv(VENV, choose_python())
+    install_requirements(python)
+    checkpoint = download_model(python)
+
+    print("\nToonCrafter setup complete.")
+    print(f"Python:     {python}")
+    print(f"Source:     {SOURCE}")
+    print(f"Checkpoint: {checkpoint}")
+    print("The official model targets 512x320 and is very memory hungry. The WebP worker uses FP16, component offload and reduced-resolution retries, but 4 GB GPUs may still be below the practical floor.")
+    print("Restart app_all.py if it is already running.")
+
+
+if __name__ == "__main__":
+    main()
