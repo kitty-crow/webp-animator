@@ -59,6 +59,7 @@ def install(advanced_pipeline_module):
 
     import app as legacy
     import analysis_upload_reuse
+    import generative_vfi
     import geometry_cache
     import job_control
     import live_timeline
@@ -79,5 +80,6 @@ def install(advanced_pipeline_module):
     # reuse the exact matched/canvas-normalised frames when sources/settings match.
     geometry_cache.install(advanced_pipeline_module, temporal_v2)
     analysis_upload_reuse.install_ui_patch()
+    generative_vfi.install(legacy, temporal_v2)
     job_control.install(legacy, advanced_pipeline_module, temporal_v2)
     live_timeline.install(job_control)
