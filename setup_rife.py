@@ -9,16 +9,29 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+from setup_engine_common import (
+    choose_torch_cuda_variant,
+    installed_torch_cuda,
+    run,
+    validate_cuda_runtime,
+)
+
 ROOT = Path(__file__).resolve().parent
 RIFE_DIR = ROOT / "third_party" / "Practical-RIFE"
 VENV_DIR = ROOT / ".rife-venv"
 MODEL_DIR = RIFE_DIR / "train_log"
 MODEL_DRIVE_ID = "1ZKjcbmt1hypiFprJPIKW0Tt0lr_2i7bg"
 
-
-def run(command, *, cwd=None):
-    print("+", " ".join(map(str, command)))
-    subprocess.run(list(map(str, command)), cwd=cwd, check=True)
+CUDA_VARIANTS = {
+    "cu118": {
+        "index": "https://download.pytorch.org/whl/cu118",
+        "runtime": "11.8",
+    },
+    "cu124": {
+        "index": "https://download.pytorch.org/whl/cu124",
+        "runtime": "12.4",
+    },
+}
 
 
 def python_version(executable: str):
@@ -91,11 +104,37 @@ def create_environment(bootstrap_python: str):
         raise RuntimeError(f"RIFE virtual environment was created but Python was not found under {VENV_DIR}")
 
     run([python, "-m", "pip", "install", "--upgrade", "pip", "wheel", "setuptools"])
+
+    variant, driver = choose_torch_cuda_variant("RIFE_CUDA_VARIANT", cuda12_variant="cu124")
+    metadata = CUDA_VARIANTS[variant]
+    index = os.environ.get("RIFE_TORCH_INDEX", str(metadata["index"]))
+    expected_cuda = str(metadata["runtime"])
+    driver_text = f"{driver[0]}.{driver[1]}" if driver else "unknown"
+    print(f"RIFE CUDA stack: {variant} (driver reports CUDA {driver_text})")
+
+    command = [python, "-m", "pip", "install"]
+    if installed_torch_cuda(python) != expected_cuda:
+        command.append("--force-reinstall")
+    command += [
+        "torch==2.6.0",
+        "torchvision==0.21.0",
+        "--index-url",
+        index,
+    ]
+    run(command)
     run([
-        python, "-m", "pip", "install",
-        "torch", "torchvision", "opencv-python-headless", "Pillow", "numpy", "gdown",
+        python,
+        "-m",
+        "pip",
+        "install",
+        "opencv-python-headless",
+        "Pillow",
+        "numpy<2.3",
+        "gdown",
     ])
-    return python
+    run([python, "-m", "pip", "check"])
+    validate_cuda_runtime(python, expected_cuda)
+    return python, variant, expected_cuda
 
 
 def install_model(python: Path):
@@ -132,18 +171,38 @@ def install_model(python: Path):
         raise RuntimeError("RIFE model installation did not produce train_log/flownet.pkl.")
 
 
+def validate_runtime(python: Path):
+    code = f"""
+import os
+import sys
+from pathlib import Path
+import torch
+source = Path({str(RIFE_DIR)!r})
+model_dir = Path({str(MODEL_DIR)!r})
+os.chdir(source)
+sys.path.insert(0, str(source))
+assert (model_dir / 'flownet.pkl').is_file()
+from model.RIFE import Model
+print('RIFE runtime import: ok')
+"""
+    run([python, "-c", code])
+
+
 def main():
     print("Installing Practical-RIFE 4.25 for WebP Animator")
     install_repo()
     bootstrap_python = choose_python()
     print(f"RIFE bootstrap Python: {bootstrap_python}")
-    rife_python = create_environment(bootstrap_python)
+    rife_python, cuda_variant, expected_cuda = create_environment(bootstrap_python)
     install_model(rife_python)
+    validate_runtime(rife_python)
 
     print("\nRIFE setup complete.")
     print(f"RIFE Python: {rife_python}")
     print(f"RIFE source: {RIFE_DIR}")
     print(f"RIFE model:  {MODEL_DIR}")
+    print(f"CUDA:        {cuda_variant} / PyTorch runtime {expected_cuda}")
+    print("Runtime preflight: CUDA and RIFE import passed.")
     print("Restart app_all.py if it is already running.")
 
 
