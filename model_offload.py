@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import types
 from pathlib import Path
 from typing import Any
 
@@ -140,6 +141,69 @@ def _stage_buffers(model, device) -> int:
     return moved
 
 
+def _module_has_meta_state(module) -> bool:
+    """Return True when any parameter/buffer in this module tree is an Accelerate meta placeholder."""
+    try:
+        for tensor in module.parameters(recurse=True):
+            if getattr(getattr(tensor, "device", None), "type", None) == "meta":
+                return True
+        for tensor in module.buffers(recurse=True):
+            if getattr(getattr(tensor, "device", None), "type", None) == "meta":
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _guard_meta_module_moves(model) -> int:
+    """Prevent legacy `.to/.cuda/.cpu` calls from materialising meta placeholders.
+
+    Accelerate deliberately replaces offloaded parameters with `meta` tensors and
+    restores the real values through forward hooks. Research code written before
+    Accelerate commonly calls `.to(cuda)` on a parent/submodule later in inference.
+    PyTorch then tries to copy those meta placeholders and raises
+    `Cannot copy out of meta tensor; no data!` before the forward hook can restore
+    anything. Those moves are redundant once the module is hook-managed, so turn
+    them into no-ops only for module trees that currently contain meta state.
+    Ordinary modules (including MoG's separately staged EMA-VFI flow network) retain
+    their normal movement behaviour.
+    """
+    guarded = 0
+    for module in model.modules():
+        if not _module_has_meta_state(module):
+            continue
+        if module.__dict__.get("_webp_meta_move_guard", False):
+            continue
+
+        original_to = module.to
+        original_cuda = module.cuda
+        original_cpu = module.cpu
+
+        def guarded_to(self, *args, __original=original_to, **kwargs):
+            if _module_has_meta_state(self):
+                return self
+            return __original(*args, **kwargs)
+
+        def guarded_cuda(self, *args, __original=original_cuda, **kwargs):
+            if _module_has_meta_state(self):
+                return self
+            return __original(*args, **kwargs)
+
+        def guarded_cpu(self, *args, __original=original_cpu, **kwargs):
+            if _module_has_meta_state(self):
+                return self
+            return __original(*args, **kwargs)
+
+        # Write straight into __dict__ so nn.Module does not try to register these
+        # bound methods as model state.
+        module.__dict__["to"] = types.MethodType(guarded_to, module)
+        module.__dict__["cuda"] = types.MethodType(guarded_cuda, module)
+        module.__dict__["cpu"] = types.MethodType(guarded_cpu, module)
+        module.__dict__["_webp_meta_move_guard"] = True
+        guarded += 1
+    return guarded
+
+
 def _ensure_accelerate():
     try:
         from accelerate import cpu_offload, disk_offload
@@ -201,6 +265,7 @@ def apply_model_offload(
     if mode == "gpu":
         model = model.to(device)
         buffer_bytes = 0
+        guarded_modules = 0
     else:
         cpu_offload, _disk = _ensure_accelerate()
 
@@ -226,6 +291,7 @@ def apply_model_offload(
                 namespace=namespace, stats=stats,
             )
         buffer_bytes = _stage_buffers(model, device)
+        guarded_modules = _guard_meta_module_moves(model)
 
     _sync_execution_device(model, device)
     setattr(model, "_webp_execution_device", device)
@@ -234,7 +300,8 @@ def apply_model_offload(
     print(
         f"{namespace.upper()}_OFFLOAD mode={mode} weights={weight_gb:.2f}GB "
         f"gpu={gpu_gb:.2f}GB free={free_gpu_gb:.2f}GB "
-        f"ram_available={ram_gb:.2f}GB cuda_buffers={buffer_bytes / 1024**2:.1f}MB",
+        f"ram_available={ram_gb:.2f}GB cuda_buffers={buffer_bytes / 1024**2:.1f}MB "
+        f"meta_move_guards={guarded_modules}",
         flush=True,
     )
     return model, mode, stats
