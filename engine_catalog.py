@@ -78,6 +78,29 @@ ENGINE_REGISTRY: tuple[dict[str, Any], ...] = (
     },
 )
 
+_ENGINE_BY_ID = {
+    str(definition["id"]).strip().lower(): definition
+    for definition in ENGINE_REGISTRY
+}
+
+
+def engine_definition(engine_id: object) -> dict[str, Any] | None:
+    definition = _ENGINE_BY_ID.get(str(engine_id or "").strip().lower())
+    return dict(definition) if definition is not None else None
+
+
+def engine_role(engine_id: object) -> str | None:
+    definition = _ENGINE_BY_ID.get(str(engine_id or "").strip().lower())
+    return str(definition.get("role")) if definition is not None and definition.get("role") else None
+
+
+def engine_label(engine_id: object) -> str:
+    text = str(engine_id or "").strip()
+    definition = _ENGINE_BY_ID.get(text.lower())
+    if definition is not None and definition.get("label"):
+        return str(definition["label"])
+    return text.upper() if text else "Engine"
+
 
 def _app_all_module():
     module = sys.modules.get("app_all")
