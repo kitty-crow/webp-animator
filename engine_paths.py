@@ -102,6 +102,30 @@ def mog_paths(variant: str):
     return ready, python, source, config, checkpoint, flow_checkpoint
 
 
+def tooncrafter_paths():
+    python = _path_from_env(
+        "TOONCRAFTER_PYTHON",
+        venv_python(ROOT / ".tooncrafter-venv"),
+    )
+    source = _path_from_env("TOONCRAFTER_DIR", ROOT / "third_party" / "ToonCrafter")
+    config = _path_from_env(
+        "TOONCRAFTER_CONFIG",
+        source / "configs" / "inference_512_v1.0.yaml",
+    )
+    checkpoint = _path_from_env(
+        "TOONCRAFTER_CHECKPOINT",
+        source / "checkpoints" / "tooncrafter_512_interp_v1" / "model.ckpt",
+    )
+    ready = (
+        python.is_file()
+        and source.is_dir()
+        and config.is_file()
+        and checkpoint.is_file()
+        and (source / "lvdm" / "models" / "samplers" / "ddim.py").is_file()
+    )
+    return ready, python, source, config, checkpoint
+
+
 def _nvidia_smi_status() -> dict | None:
     executable = shutil.which("nvidia-smi")
     if not executable:
@@ -267,4 +291,15 @@ def engine_status(legacy=None) -> dict:
             "advanced": True,
             "setup": f"python setup_mog.py --variant {variant}",
         }
+
+    ready, python, source, config, checkpoint = tooncrafter_paths()
+    result["tooncrafter"] = {
+        "ready": bool(ready),
+        "python": str(python),
+        "source": str(source),
+        "config": str(config),
+        "checkpoint": str(checkpoint),
+        "advanced": True,
+        "setup": "python setup_tooncrafter.py",
+    }
     return result
