@@ -10,6 +10,7 @@ import generative_vfi
 import model_offload
 import mog_selective_worker
 import setup_engine_common
+import tooncrafter_selective_worker_entry
 import tooncrafter_vfi
 
 
@@ -155,6 +156,32 @@ class EngineStabilityTests(unittest.TestCase):
         self.assertIsInstance(parent.vfi.net, torch.nn.Module)
         self.assertIs(parent.vfi.net.eval(), parent.vfi.net)
         self.assertFalse(parent.vfi.net.training)
+
+    def test_tooncrafter_repairs_non_module_eval_return(self):
+        try:
+            import torch
+        except Exception as exc:
+            self.skipTest(f"torch unavailable in test environment: {exc}")
+
+        model = torch.nn.Sequential(torch.nn.Linear(4, 4))
+        model.train = lambda value: value
+        self.assertIs(model.eval(), False)
+        tooncrafter_selective_worker_entry._repair_bad_eval_overrides(torch, model)
+        self.assertIs(model.eval(), model)
+        self.assertFalse(model.training)
+
+    def test_diffusion_low_vram_targets_are_unet_aligned(self):
+        gib = 1024**3
+        for worker in (mog_selective_worker, tooncrafter_selective_worker_entry):
+            for vram in (4 * gib, 6 * gib, 11 * gib, 16 * gib):
+                ladder = worker._target_ladder(vram)
+                self.assertTrue(ladder)
+                for width, height in ladder:
+                    self.assertEqual(width % worker.SPATIAL_ALIGNMENT, 0)
+                    self.assertEqual(height % worker.SPATIAL_ALIGNMENT, 0)
+            # The exact old preflight size that caused MoG's 8-vs-7 skip mismatch
+            # must be normalised before it can reach either denoiser.
+            self.assertEqual(worker._normalise_target((224, 128)), (192, 128))
 
 
 if __name__ == "__main__":
