@@ -75,6 +75,28 @@ def _ensure_flow_checkpoint(source, supplied):
 implementation._ensure_flow_checkpoint = _ensure_flow_checkpoint
 
 
+# Upstream EMA-VFI deliberately replaces `net.train` with `lambda x: x` after
+# putting the flow network in eval mode.  Unfortunately torch.nn.Module.eval()
+# is implemented as `return self.train(False)`, so any later chained `.eval()`
+# returns the boolean False instead of the module.  The low-VRAM staging code does
+# exactly that while moving the flow network CPU <-> CUDA.  During construction we
+# therefore use an eval implementation with normal Module semantics, then remove the
+# upstream instance-level train override once the model is fully loaded.
+def _repair_vfi_train_override(torch, model) -> None:
+    vfi = getattr(model, "vfi", None)
+    net = getattr(vfi, "net", None)
+    if not isinstance(net, torch.nn.Module):
+        raise RuntimeError(
+            "MoG EMA-VFI motion network was not a torch.nn.Module after model load; "
+            f"got {type(net).__name__}."
+        )
+    if "train" in net.__dict__:
+        del net.__dict__["train"]
+    net.eval()
+    if not isinstance(getattr(vfi, "net", None), torch.nn.Module):
+        raise RuntimeError("MoG EMA-VFI motion network became invalid while restoring eval semantics.")
+
+
 # Upstream performs one top-level `model.to(cuda)` after the checkpoint is loaded.
 # Intercept exactly that object, not arbitrary large children.  Low-VRAM machines
 # then use Accelerate CPU/disk offload; ordinary construction-time .to() calls on
@@ -90,11 +112,19 @@ def _load_model_offloaded(source, config_path, checkpoint, flow_checkpoint):
 
     original_torch_load = torch.load
     original_module_to = torch.nn.Module.to
+    original_module_eval = torch.nn.Module.eval
     routed = {"done": False}
 
     def cpu_default_load(*load_args, **load_kwargs):
         load_kwargs.setdefault("map_location", "cpu")
         return original_torch_load(*load_args, **load_kwargs)
+
+    def stable_module_eval(module):
+        # Call the class implementation directly so an instance-level `train`
+        # replacement (as used by MoG's EMA-VFI helper) cannot change eval()'s
+        # return type from Module to bool.
+        torch.nn.Module.train(module, False)
+        return module
 
     def routed_module_to(module, *to_args, **to_kwargs):
         target = _top_level_model.get("value")
@@ -128,6 +158,7 @@ def _load_model_offloaded(source, config_path, checkpoint, flow_checkpoint):
 
     torch.load = cpu_default_load
     torch.nn.Module.to = routed_module_to
+    torch.nn.Module.eval = stable_module_eval
     _top_level_model["value"] = None
     try:
         model_tuple = _original_load_model(source, config_path, checkpoint, flow_checkpoint)
@@ -136,11 +167,13 @@ def _load_model_offloaded(source, config_path, checkpoint, flow_checkpoint):
                 "MoG top-level model placement hook did not run; refusing an "
                 "unqualified load path."
             )
+        _repair_vfi_train_override(torch, model_tuple[2])
         return model_tuple
     finally:
         _top_level_model["value"] = None
         torch.load = original_torch_load
         torch.nn.Module.to = original_module_to
+        torch.nn.Module.eval = original_module_eval
 
 
 implementation.load_model = _load_model_offloaded
