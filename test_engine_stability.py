@@ -8,6 +8,7 @@ import engine_catalog
 import generative_pipeline_bridge
 import generative_vfi
 import model_offload
+import mog_selective_worker
 import setup_engine_common
 import tooncrafter_vfi
 
@@ -128,6 +129,32 @@ class EngineStabilityTests(unittest.TestCase):
         # redundant: the forward hook streams the real weight to its execution device.
         self.assertIs(layer.to(torch.device("cuda")), layer)
         self.assertEqual(next(layer.parameters()).device.type, "meta")
+
+    def test_mog_vfi_train_override_is_removed_before_staged_flow(self):
+        try:
+            import torch
+        except Exception as exc:
+            self.skipTest(f"torch unavailable in test environment: {exc}")
+
+        class Parent:
+            pass
+
+        class VFI:
+            pass
+
+        parent = Parent()
+        parent.vfi = VFI()
+        parent.vfi.net = torch.nn.Sequential(torch.nn.Linear(4, 4))
+        parent.vfi.net.eval()
+        # Upstream emavfi.vfi_utils installs exactly this override. Module.eval()
+        # subsequently returns False because it delegates to self.train(False).
+        parent.vfi.net.train = lambda value: value
+        self.assertIs(parent.vfi.net.eval(), False)
+
+        mog_selective_worker._repair_vfi_train_override(torch, parent)
+        self.assertIsInstance(parent.vfi.net, torch.nn.Module)
+        self.assertIs(parent.vfi.net.eval(), parent.vfi.net)
+        self.assertFalse(parent.vfi.net.training)
 
 
 if __name__ == "__main__":
