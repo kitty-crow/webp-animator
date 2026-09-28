@@ -12,6 +12,17 @@ from typing import Any
 
 _GIB = 1024 ** 3
 
+# These research models sometimes call methods on wrapper modules and then access
+# parameters of registered children directly instead of invoking the child's
+# forward(). Accelerate cannot see that access unless the wrapper is marked for
+# preload. Loading the wrapper subtree for the duration of that forward keeps those
+# direct parameters real rather than meta placeholders.
+_PRELOAD_MODULE_CLASSES = [
+    "FrozenOpenCLIPEmbedder",
+    "FrozenOpenCLIPImageEmbedder",
+    "FrozenOpenCLIPImageEmbedderV2",
+]
+
 
 def model_nbytes(model) -> int:
     """Return resident parameter+buffer bytes without materialising new tensors."""
@@ -161,12 +172,9 @@ def _guard_meta_module_moves(model) -> int:
     Accelerate deliberately replaces offloaded parameters with `meta` tensors and
     restores the real values through forward hooks. Research code written before
     Accelerate commonly calls `.to(cuda)` on a parent/submodule later in inference.
-    PyTorch then tries to copy those meta placeholders and raises
-    `Cannot copy out of meta tensor; no data!` before the forward hook can restore
-    anything. Those moves are redundant once the module is hook-managed, so turn
-    them into no-ops only for module trees that currently contain meta state.
-    Ordinary modules (including MoG's separately staged EMA-VFI flow network) retain
-    their normal movement behaviour.
+    PyTorch then tries to copy those meta placeholders before the forward hook can
+    restore anything. Those moves are redundant once the module is hook-managed, so
+    turn them into no-ops only for module trees that currently contain meta state.
     """
     guarded = 0
     for module in model.modules():
@@ -194,8 +202,6 @@ def _guard_meta_module_moves(model) -> int:
                 return self
             return __original(*args, **kwargs)
 
-        # Write straight into __dict__ so nn.Module does not try to register these
-        # bound methods as model state.
         module.__dict__["to"] = types.MethodType(guarded_to, module)
         module.__dict__["cuda"] = types.MethodType(guarded_cuda, module)
         module.__dict__["cpu"] = types.MethodType(guarded_cpu, module)
@@ -242,6 +248,7 @@ def _disk_offload(model, device, *, source: Path, checkpoint: Path, namespace: s
         offload_dir=offload_root,
         execution_device=device,
         offload_buffers=False,
+        preload_module_classes=_PRELOAD_MODULE_CLASSES,
     )
     setattr(model, "_webp_offload_dir", str(offload_root))
     return model
@@ -271,7 +278,12 @@ def apply_model_offload(
 
         if mode == "cpu":
             try:
-                model = cpu_offload(model, execution_device=device, offload_buffers=False)
+                model = cpu_offload(
+                    model,
+                    execution_device=device,
+                    offload_buffers=False,
+                    preload_module_classes=_PRELOAD_MODULE_CLASSES,
+                )
             except (MemoryError, OSError, RuntimeError) as exc:
                 if stats.get("requested") != "auto":
                     raise
