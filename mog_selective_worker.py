@@ -8,9 +8,47 @@ import mog_selective_worker_v2 as implementation
 from model_offload import apply_model_offload
 
 
-# Capture the exact top-level MoG model at checkpoint-load time.  This is critical:
+SPATIAL_ALIGNMENT = 64
+
+
+def _normalise_target(target):
+    """Return a spatial size compatible with MoG's VAE + four-level U-Net.
+
+    The VAE contributes an 8x reduction and the U-Net downsamples latent space three
+    more times. Both source dimensions therefore need to be multiples of 64 or skip
+    tensors can differ by one pixel during the up path (for example 8 versus 7).
+    """
+    width, height = (max(SPATIAL_ALIGNMENT, int(value)) for value in target)
+    aligned = (
+        max(SPATIAL_ALIGNMENT * 2, (width // SPATIAL_ALIGNMENT) * SPATIAL_ALIGNMENT),
+        max(SPATIAL_ALIGNMENT * 2, (height // SPATIAL_ALIGNMENT) * SPATIAL_ALIGNMENT),
+    )
+    if aligned != (width, height):
+        print(
+            f"MoG target {width}x{height} is not U-Net aligned; "
+            f"using {aligned[0]}x{aligned[1]} instead",
+            flush=True,
+        )
+    return aligned
+
+
+def _target_ladder(total_vram):
+    gb = total_vram / 1024**3
+    if gb <= 4.5:
+        return [(256, 128), (192, 128), (128, 128)]
+    if gb <= 8.0:
+        return [(320, 192), (256, 128), (192, 128), (128, 128)]
+    if gb <= 12.0:
+        return [(448, 256), (384, 256), (320, 192), (256, 128)]
+    return [(512, 320), (448, 256), (384, 256), (320, 192), (256, 128), (192, 128)]
+
+
+implementation._target_ladder = _target_ladder
+
+
+# Capture the exact top-level MoG model at checkpoint-load time. This is critical:
 # OpenCLIP and other large children call .to(...) while the parent model is still
-# being constructed.  The old size-based global Module.to hook could mistake one of
+# being constructed. The old size-based global Module.to hook could mistake one of
 # those children for the diffusion model, offload it to meta storage too early, and
 # then make the subsequent MoG checkpoint load a no-op for those parameters.
 _top_level_model = {"value": None}
@@ -76,10 +114,10 @@ implementation._ensure_flow_checkpoint = _ensure_flow_checkpoint
 
 
 # Upstream EMA-VFI deliberately replaces `net.train` with `lambda x: x` after
-# putting the flow network in eval mode.  Unfortunately torch.nn.Module.eval()
+# putting the flow network in eval mode. Unfortunately torch.nn.Module.eval()
 # is implemented as `return self.train(False)`, so any later chained `.eval()`
-# returns the boolean False instead of the module.  The low-VRAM staging code does
-# exactly that while moving the flow network CPU <-> CUDA.  During construction we
+# returns the boolean False instead of the module. The low-VRAM staging code does
+# exactly that while moving the flow network CPU <-> CUDA. During construction we
 # therefore use an eval implementation with normal Module semantics, then remove the
 # upstream instance-level train override once the model is fully loaded.
 def _repair_vfi_train_override(torch, model) -> None:
@@ -98,7 +136,7 @@ def _repair_vfi_train_override(torch, model) -> None:
 
 
 # Upstream performs one top-level `model.to(cuda)` after the checkpoint is loaded.
-# Intercept exactly that object, not arbitrary large children.  Low-VRAM machines
+# Intercept exactly that object, not arbitrary large children. Low-VRAM machines
 # then use Accelerate CPU/disk offload; ordinary construction-time .to() calls on
 # OpenCLIP, VAE, flow, etc. retain normal PyTorch semantics.
 _original_load_model = implementation.load_model
@@ -192,6 +230,7 @@ def _generate_clip_offloaded(
     *,
     ddim_steps,
 ):
+    target = _normalise_target(target)
     rgb0, placement0 = implementation._fit_rgb(first, target)
     rgb1, placement1 = implementation._fit_rgb(second, target)
     if placement0 != placement1:
