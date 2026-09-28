@@ -5,7 +5,15 @@ import gc
 import shutil
 
 import mog_selective_worker_v2 as implementation
-from model_offload import apply_model_offload, model_nbytes
+from model_offload import apply_model_offload
+
+
+# Capture the exact top-level MoG model at checkpoint-load time.  This is critical:
+# OpenCLIP and other large children call .to(...) while the parent model is still
+# being constructed.  The old size-based global Module.to hook could mistake one of
+# those children for the diffusion model, offload it to meta storage too early, and
+# then make the subsequent MoG checkpoint load a no-op for those parameters.
+_top_level_model = {"value": None}
 
 
 # The released MoG checkpoints are roughly ten gigabytes in FP32. Convert the
@@ -16,8 +24,26 @@ _original_load_checkpoint = implementation._load_checkpoint_mmap
 
 
 def _load_checkpoint_low_ram(torch, model, checkpoint):
+    _top_level_model["value"] = model
     model = model.half().eval()
-    return _original_load_checkpoint(torch, model, checkpoint)
+    loaded = _original_load_checkpoint(torch, model, checkpoint)
+
+    # A freshly constructed model must not contain meta placeholders here. Meta is
+    # only legal after WebP Animator deliberately installs Accelerate offload hooks.
+    # Catch accidental early-offload regressions before model placement.
+    meta = [
+        name
+        for name, tensor in list(loaded.named_parameters()) + list(loaded.named_buffers())
+        if getattr(getattr(tensor, "device", None), "type", None) == "meta"
+    ]
+    if meta:
+        preview = ", ".join(meta[:6])
+        raise RuntimeError(
+            "MoG checkpoint load left parameters on the meta device before offload "
+            f"was installed ({len(meta)} tensors; first: {preview}). This indicates "
+            "an invalid model-construction/offload ordering."
+        )
+    return loaded
 
 
 implementation._load_checkpoint_mmap = _load_checkpoint_low_ram
@@ -49,6 +75,10 @@ def _ensure_flow_checkpoint(source, supplied):
 implementation._ensure_flow_checkpoint = _ensure_flow_checkpoint
 
 
+# Upstream performs one top-level `model.to(cuda)` after the checkpoint is loaded.
+# Intercept exactly that object, not arbitrary large children.  Low-VRAM machines
+# then use Accelerate CPU/disk offload; ordinary construction-time .to() calls on
+# OpenCLIP, VAE, flow, etc. retain normal PyTorch semantics.
 _original_load_model = implementation.load_model
 
 
@@ -67,47 +97,48 @@ def _load_model_offloaded(source, config_path, checkpoint, flow_checkpoint):
         return original_torch_load(*load_args, **load_kwargs)
 
     def routed_module_to(module, *to_args, **to_kwargs):
-        # Lightning's .to() already updated model.device before this base method is
-        # reached, so upstream sampling code still sees cuda:0 while Accelerate keeps
-        # most parameters on RAM/disk between individual layer forwards.
-        if not routed["done"]:
+        target = _top_level_model.get("value")
+        if not routed["done"] and target is not None and module is target:
             # MoG inference never enters ema_scope(), so the training-time EMA shadow
-            # is dead weight here. It is roughly another model-sized set of buffers.
-            # Drop it before deciding residency/offload and before staging buffers.
+            # is dead weight here and is roughly another model-sized set of buffers.
             if getattr(module, "model_ema", None) is not None:
                 module.model_ema = None
                 if hasattr(module, "use_ema"):
                     module.use_ema = False
                 gc.collect()
+
+            routed["done"] = True
+            # apply_model_offload's fully-resident path itself calls model.to(cuda).
+            # Temporarily restore PyTorch's real method so that call cannot recurse
+            # back into this interception hook.
+            torch.nn.Module.to = original_module_to
             try:
-                size = model_nbytes(module)
-            except Exception:
-                size = 0
-            if size >= 512 * 1024**2:
-                routed["done"] = True
-                torch.nn.Module.to = original_module_to
-                try:
-                    placed, _mode, _stats = apply_model_offload(
-                        module,
-                        torch.device("cuda"),
-                        source=source,
-                        checkpoint=checkpoint,
-                        env_var="MOG_OFFLOAD",
-                        namespace="mog",
-                    )
-                    return placed
-                finally:
-                    torch.nn.Module.to = routed_module_to
+                placed, _mode, _stats = apply_model_offload(
+                    module,
+                    torch.device("cuda"),
+                    source=source,
+                    checkpoint=checkpoint,
+                    env_var="MOG_OFFLOAD",
+                    namespace="mog",
+                )
+                return placed
+            finally:
+                torch.nn.Module.to = routed_module_to
         return original_module_to(module, *to_args, **to_kwargs)
 
     torch.load = cpu_default_load
     torch.nn.Module.to = routed_module_to
+    _top_level_model["value"] = None
     try:
         model_tuple = _original_load_model(source, config_path, checkpoint, flow_checkpoint)
         if not routed["done"]:
-            raise RuntimeError("MoG model placement hook did not run; refusing an unqualified load path.")
+            raise RuntimeError(
+                "MoG top-level model placement hook did not run; refusing an "
+                "unqualified load path."
+            )
         return model_tuple
     finally:
+        _top_level_model["value"] = None
         torch.load = original_torch_load
         torch.nn.Module.to = original_module_to
 
