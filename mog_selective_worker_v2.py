@@ -29,7 +29,7 @@ from worker_common import (
 TARGETS = ((512, 320), (448, 256), (384, 224), (320, 192), (256, 160), (224, 128))
 PREP_UNITS = 12
 DEFAULT_DDIM_STEPS = int(os.environ.get("MOG_DDIM_STEPS", "50"))
-WORKER_REVISION = "mog-selective-low-vram-v2"
+WORKER_REVISION = "mog-selective-low-vram-v3"
 
 
 class ProgressState:
@@ -153,6 +153,26 @@ def _ensure_flow_checkpoint(source: Path, supplied: Path) -> Path:
     return expected
 
 
+def _stage_vfi_net(torch, net, device):
+    """Move EMA-VFI without calling its deliberately replaced ``train`` method.
+
+    Upstream get_vfi_model() replaces ``net.train`` with ``lambda x: x`` after
+    putting the network in eval mode. PyTorch's Module.eval() is implemented as
+    ``return self.train(False)``, so chaining ``.eval()`` after that replacement
+    returns the boolean False rather than the module. Assigning that result back to
+    ``vfi.net`` destroys the motion network. Call Module.train directly instead so
+    eval state is propagated while preserving the actual module object.
+    """
+    if not isinstance(net, torch.nn.Module):
+        raise RuntimeError(
+            "MoG EMA-VFI motion network is not a torch module before staging "
+            f"(got {type(net).__name__})."
+        )
+    net = net.float().to(device)
+    torch.nn.Module.train(net, False)
+    return net
+
+
 def load_model(source: Path, config_path: Path, checkpoint: Path, flow_checkpoint: Path):
     os.chdir(source)
     sys.path.insert(0, str(source))
@@ -213,18 +233,21 @@ def load_model(source: Path, config_path: Path, checkpoint: Path, flow_checkpoin
     model.perframe_ae = True
 
     if vfi is not None and hasattr(vfi, "net"):
-        vfi.net = vfi.net.float().cpu().eval()
+        vfi.net = _stage_vfi_net(torch, vfi.net, torch.device("cpu"))
 
     original_cal_flow = mog_inference.cal_flow
 
     def staged_cal_flow(videos, vfi_model):
-        if hasattr(vfi_model, "net"):
-            vfi_model.net = vfi_model.net.float().to(videos.device).eval()
+        if not hasattr(vfi_model, "net"):
+            raise RuntimeError("MoG EMA-VFI wrapper has no motion network.")
+        vfi_model.net = _stage_vfi_net(torch, vfi_model.net, videos.device)
         try:
             motion = original_cal_flow(videos.float(), vfi_model)
         finally:
-            if hasattr(vfi_model, "net"):
-                vfi_model.net = vfi_model.net.cpu().eval()
+            # original_cal_flow may itself move the same module, but it must still
+            # be an nn.Module when it returns. Validate that invariant before
+            # returning the expensive motion network to host RAM.
+            vfi_model.net = _stage_vfi_net(torch, vfi_model.net, torch.device("cpu"))
             release_cuda(torch)
         return motion
 
