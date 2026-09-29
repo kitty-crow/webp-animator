@@ -47,6 +47,19 @@
       <label>Similarity sigma <input id="sigma" type="number" min="0.01" step="0.01" value="28"></label>
       <label>Alpha threshold <input id="alpha-threshold" type="number" min="0" max="255" value="8"></label>
       <label>Coarse proxy max side <input id="proxy-max-side" type="number" min="32" value="256"></label>
+      <label>Interpolation model
+        <select id="interpolation-engine">
+          <option value="none">None</option>
+          <option value="rife">RIFE 4.25 ONNX</option>
+        </select>
+      </label>
+      <label>Interpolation multiplier
+        <select id="interpolation-multiplier">
+          <option value="2">2×</option>
+          <option value="4">4×</option>
+          <option value="8">8×</option>
+        </select>
+      </label>
       <label>Frame duration (ms) <input id="duration" type="number" min="1" value="100"></label>
       <label>Loop count <input id="loop" type="number" min="0" max="65535" value="0"></label>
       <label>Browser WebP quality <input id="quality" type="number" min="1" max="100" value="95"></label>
