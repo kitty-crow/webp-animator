@@ -2,16 +2,18 @@ import { AdaptiveAlignmentEngine, renderUnionFrames } from './alignment.js';
 import { decodeInputFiles } from './frame-codec.js';
 import { gpuLabel } from './hardware.js';
 import { InferenceWorkerClient, type RenderWorkerProgress } from './inference-worker-client.js';
-import type { FrameGeneratorEngine, RenderInterpolationEngine } from './inference-worker-protocol.js';
+import type { FrameGeneratorEngine, RenderInterpolationEngine, TemporalRepairEngine } from './inference-worker-protocol.js';
 import { interpolateAmtFrames } from './inference/amt-interpolation.js';
 import { generateMidpointAnchors } from './inference/frame-generator.js';
 import { interpolateGenerativeFrames, type GenerativeInterpolationEngine } from './inference/generative-interpolation.js';
+import { repairProPainterFrames } from './inference/propainter.js';
 import { runPreflight } from './preflight.js';
 import type { ComputeBackend, PreflightResult, ProgressUpdate, RegistrationSettings, ShiftResult } from './types.js';
 import { encodeAnimatedWebp } from './webp-muxer.js';
 
 type ManifestInterpolationEngine = Exclude<RenderInterpolationEngine, 'none' | 'rife'>;
 type ManifestGeneratorEngine = Exclude<FrameGeneratorEngine, 'none'>;
+type ManifestRepairEngine = Exclude<TemporalRepairEngine, 'none'>;
 
 function element<T extends HTMLElement>(id: string, constructor: { new (): T }): T {
   const candidate = document.getElementById(id);
@@ -50,6 +52,9 @@ const engineInput = selectInput('interpolation-engine');
 const generatorManifestField = element('generator-manifest-field', HTMLLabelElement);
 const generatorManifestInput = element('generator-manifest-url', HTMLInputElement);
 const generatorInput = selectInput('frame-generator');
+const repairManifestField = element('repair-manifest-field', HTMLLabelElement);
+const repairManifestInput = element('repair-manifest-url', HTMLInputElement);
+const repairInput = selectInput('repair-engine');
 const inferenceWorker = new InferenceWorkerClient();
 
 let preflight: PreflightResult | null = null;
@@ -82,6 +87,10 @@ function frameGenerator(): FrameGeneratorEngine {
   return value === 'eden' || value === 'speed' ? value : 'none';
 }
 
+function temporalRepair(): TemporalRepairEngine {
+  return repairInput.value === 'propainter' ? 'propainter' : 'none';
+}
+
 function isGenerative(engine: RenderInterpolationEngine): engine is GenerativeInterpolationEngine {
   return engine === 'resshift' || engine === 'mog' || engine === 'tooncrafter';
 }
@@ -92,6 +101,10 @@ function requiresManifest(engine: RenderInterpolationEngine): engine is Manifest
 
 function requiresGeneratorManifest(generator: FrameGeneratorEngine): generator is ManifestGeneratorEngine {
   return generator === 'eden' || generator === 'speed';
+}
+
+function requiresRepairManifest(repair: TemporalRepairEngine): repair is ManifestRepairEngine {
+  return repair === 'propainter';
 }
 
 function engineLabel(engine: RenderInterpolationEngine): string {
@@ -109,12 +122,20 @@ function generatorLabel(generator: FrameGeneratorEngine): string {
   return 'disabled';
 }
 
+function repairLabel(repair: TemporalRepairEngine): string {
+  return repair === 'propainter' ? 'ProPainter selective repair' : 'disabled';
+}
+
 function manifestStorageKey(engine: ManifestInterpolationEngine): string {
   return `webp-animator-model-manifest:${engine}`;
 }
 
 function generatorManifestStorageKey(generator: ManifestGeneratorEngine): string {
   return `webp-animator-generator-manifest:${generator}`;
+}
+
+function repairManifestStorageKey(repair: ManifestRepairEngine): string {
+  return `webp-animator-repair-manifest:${repair}`;
 }
 
 function syncManifestField(): void {
@@ -137,6 +158,16 @@ function syncGeneratorManifestField(): void {
   generatorManifestInput.value = localStorage.getItem(generatorManifestStorageKey(generator)) ?? '';
 }
 
+function syncRepairManifestField(): void {
+  const repair = temporalRepair();
+  repairManifestField.hidden = !requiresRepairManifest(repair);
+  if (!requiresRepairManifest(repair)) {
+    repairManifestInput.value = '';
+    return;
+  }
+  repairManifestInput.value = localStorage.getItem(repairManifestStorageKey(repair)) ?? '';
+}
+
 function selectedManifestUrl(engine: RenderInterpolationEngine): string | null {
   if (!requiresManifest(engine)) return null;
   const value = manifestInput.value.trim();
@@ -148,6 +179,13 @@ function selectedGeneratorManifestUrl(generator: FrameGeneratorEngine): string |
   if (!requiresGeneratorManifest(generator)) return null;
   const value = generatorManifestInput.value.trim();
   if (!value) throw new Error(`${generatorLabel(generator)} requires the manifest.json produced by its browser exporter.`);
+  return value;
+}
+
+function selectedRepairManifestUrl(repair: TemporalRepairEngine): string | null {
+  if (!requiresRepairManifest(repair)) return null;
+  const value = repairManifestInput.value.trim();
+  if (!value) throw new Error(`${repairLabel(repair)} requires the manifest.json produced from licensed ProPainter weights.`);
   return value;
 }
 
@@ -193,7 +231,9 @@ function setProgress(update: ProgressUpdate): void {
         ? 'Generating midpoint anchors'
         : update.stage === 'interpolate'
           ? 'Generating intermediate frames'
-          : 'Encoding WebP';
+          : update.stage === 'repair'
+            ? 'Repairing temporal alpha holes'
+            : 'Encoding WebP';
   progressText.textContent = `${label} · ${update.current}/${update.total}`;
 }
 
@@ -206,7 +246,7 @@ function setWorkerProgress(update: RenderWorkerProgress): void {
     setProgress({ stage: 'decode', current: update.current, total: update.total, fileName: update.detail });
   } else {
     setProgress({ stage: update.stage, current: update.current, total: update.total });
-    if ((update.stage === 'generate' || update.stage === 'interpolate') && update.detail) {
+    if ((update.stage === 'generate' || update.stage === 'interpolate' || update.stage === 'repair') && update.detail) {
       progressText.textContent = `${update.detail} · ${update.current}/${update.total}`;
     }
   }
@@ -251,7 +291,7 @@ function populateFooter(result: PreflightResult): void {
   const benchmarks = document.createElement('span');
   benchmarks.textContent = `Pre-flight: ${benchmarkLabel(result)}`;
   const models = document.createElement('span');
-  models.textContent = `Execution: ${workerPipeline} · RIFE 4.25 built in · EDEN/SPEED/AMT/ResShift/MoG/ToonCrafter adapters ready for exported manifests · ProPainter licence-gated`;
+  models.textContent = `Execution: ${workerPipeline} · RIFE 4.25 built in · EDEN/SPEED/AMT/ResShift/MoG/ToonCrafter manifest-ready · ProPainter manifest-ready with user-supplied licensed weights`;
   footerResources.append(selected, details, benchmarks, models);
 }
 
@@ -285,6 +325,7 @@ interface FinalRenderResult {
   readonly mode: 'persistent-worker' | 'compatibility';
   readonly generator: FrameGeneratorEngine;
   readonly interpolation: RenderInterpolationEngine;
+  readonly repair: TemporalRepairEngine;
 }
 
 function passthroughSequence(
@@ -402,12 +443,36 @@ async function interpolateCompatibilityGenerative(
   );
 }
 
+async function repairCompatibility(
+  manifestUrl: string,
+  frames: readonly ImageData[],
+  durations: readonly (number | null)[],
+  activePreflight: PreflightResult,
+): Promise<InterpolationSequence> {
+  const repaired = await repairProPainterFrames(
+    manifestUrl,
+    frames,
+    activePreflight.profile,
+    (update) => {
+      ensureCompatibilityActive();
+      setProgress({ stage: 'repair', current: update.current, total: update.total });
+      progressText.textContent = `${update.detail} · ${update.current}/${update.total}`;
+      const provider = update.provider ? ` via ${update.provider}` : '';
+      setStatus(`ProPainter compatibility repair${provider}. Keep this tab active for best throughput.`);
+    },
+    ensureCompatibilityActive,
+  );
+  return { frames: repaired.frames, durations, provider: repaired.provider };
+}
+
 async function persistentRender(
   files: readonly File[],
   generator: FrameGeneratorEngine,
   generatorManifestUrl: string | null,
   interpolation: RenderInterpolationEngine,
   manifestUrl: string | null,
+  repair: TemporalRepairEngine,
+  repairManifestUrl: string | null,
 ): Promise<FinalRenderResult> {
   const started = inferenceWorker.renderFiles(
     files,
@@ -416,6 +481,8 @@ async function persistentRender(
     generatorManifestUrl,
     interpolation,
     manifestUrl,
+    repair,
+    repairManifestUrl,
     interpolationMultiplier(),
     outputDuration(),
     outputLoop(),
@@ -434,6 +501,7 @@ async function persistentRender(
       mode: 'persistent-worker',
       generator,
       interpolation,
+      repair,
     };
   } finally {
     activeInferenceJobId = null;
@@ -447,6 +515,8 @@ async function compatibilityRender(
   generatorManifestUrl: string | null,
   interpolation: RenderInterpolationEngine,
   manifestUrl: string | null,
+  repair: TemporalRepairEngine,
+  repairManifestUrl: string | null,
 ): Promise<FinalRenderResult> {
   compatibilityJobActive = true;
   compatibilityCancelRequested = false;
@@ -484,10 +554,17 @@ async function compatibilityRender(
     } else {
       interpolated = passthroughSequence(generated.frames, generated.durations);
     }
+
+    let repaired = interpolated;
+    if (requiresRepairManifest(repair)) {
+      if (repairManifestUrl === null) throw new Error('ProPainter manifest URL is missing.');
+      repaired = await repairCompatibility(repairManifestUrl, interpolated.frames, interpolated.durations, activePreflight);
+    }
+
     ensureCompatibilityActive();
-    const blob = await encodeAnimatedWebp(interpolated.frames, {
+    const blob = await encodeAnimatedWebp(repaired.frames, {
       duration,
-      durations: interpolated.durations,
+      durations: repaired.durations,
       loop: outputLoop(),
       quality: outputQuality(),
     }, (current, total) => {
@@ -496,12 +573,13 @@ async function compatibilityRender(
     });
     return {
       blob,
-      provider: mergeProvider(generated.provider, interpolated.provider),
+      provider: mergeProvider(mergeProvider(generated.provider, interpolated.provider), repaired.provider),
       computeBackend: activePreflight.selectedBackend,
       pairwise: registration.pairwise,
       mode: 'compatibility',
       generator,
       interpolation,
+      repair,
     };
   } finally {
     compatibilityJobActive = false;
@@ -526,11 +604,14 @@ function publishResult(result: FinalRenderResult): void {
   const modelReport = result.interpolation === 'none'
     ? 'Interpolation: disabled'
     : `Interpolation: ${engineLabel(result.interpolation)}`;
+  const repairReport = result.repair === 'none'
+    ? 'Temporal repair: disabled'
+    : `Temporal repair: ${repairLabel(result.repair)}`;
   const providerReport = result.provider === null ? 'Model provider: none' : `Model provider: ${result.provider}`;
   const modeReport = result.mode === 'persistent-worker'
     ? `Pipeline: persistent worker via ${result.computeBackend}`
     : `Pipeline: compatibility coordinator via ${result.computeBackend}`;
-  results.textContent = `${modeReport}\n${generatorReport}\n${modelReport}\n${providerReport}\n${alignmentReport}`;
+  results.textContent = `${modeReport}\n${generatorReport}\n${modelReport}\n${repairReport}\n${providerReport}\n${alignmentReport}`;
   progress.value = 1;
   progressText.textContent = 'Complete';
   setStatus(`Finished entirely on this device with ${result.computeBackend}.`, 'success');
@@ -539,6 +620,7 @@ function publishResult(result: FinalRenderResult): void {
 async function initialise(): Promise<void> {
   syncManifestField();
   syncGeneratorManifestField();
+  syncRepairManifestField();
   preflightStatus.textContent = 'Running automatic hardware pre-flight…';
   await ensureIsolationServiceWorker();
   try {
@@ -558,6 +640,7 @@ fileInput.addEventListener('change', () => {
 
 engineInput.addEventListener('change', syncManifestField);
 generatorInput.addEventListener('change', syncGeneratorManifestField);
+repairInput.addEventListener('change', syncRepairManifestField);
 manifestInput.addEventListener('change', () => {
   const engine = interpolationEngine();
   if (!requiresManifest(engine)) return;
@@ -571,6 +654,13 @@ generatorManifestInput.addEventListener('change', () => {
   const value = generatorManifestInput.value.trim();
   if (value) localStorage.setItem(generatorManifestStorageKey(generator), value);
   else localStorage.removeItem(generatorManifestStorageKey(generator));
+});
+repairManifestInput.addEventListener('change', () => {
+  const repair = temporalRepair();
+  if (!requiresRepairManifest(repair)) return;
+  const value = repairManifestInput.value.trim();
+  if (value) localStorage.setItem(repairManifestStorageKey(repair), value);
+  else localStorage.removeItem(repairManifestStorageKey(repair));
 });
 
 cancelButton.addEventListener('click', () => {
@@ -608,16 +698,19 @@ runButton.addEventListener('click', () => {
     progress.value = 0;
     const generator = frameGenerator();
     const interpolation = interpolationEngine();
+    const repair = temporalRepair();
     try {
       const generatorManifestUrl = selectedGeneratorManifestUrl(generator);
       const manifestUrl = selectedManifestUrl(interpolation);
+      const repairManifestUrl = selectedRepairManifestUrl(repair);
       const generatorText = generator === 'none' ? '' : ` with ${generatorLabel(generator)}`;
-      const interpolationText = interpolation === 'none' ? '' : ` and ${engineLabel(interpolation)}`;
-      setStatus(`Processing entirely on this device${generatorText}${interpolationText}…`);
+      const interpolationText = interpolation === 'none' ? '' : `, ${engineLabel(interpolation)}`;
+      const repairText = repair === 'none' ? '' : `, and ${repairLabel(repair)}`;
+      setStatus(`Processing entirely on this device${generatorText}${interpolationText}${repairText}…`);
       const usePersistentWorker = activePreflight.profile.workerSupport && activePreflight.profile.offscreenCanvas;
       const result = usePersistentWorker
-        ? await persistentRender(files, generator, generatorManifestUrl, interpolation, manifestUrl)
-        : await compatibilityRender(files, activePreflight, generator, generatorManifestUrl, interpolation, manifestUrl);
+        ? await persistentRender(files, generator, generatorManifestUrl, interpolation, manifestUrl, repair, repairManifestUrl)
+        : await compatibilityRender(files, activePreflight, generator, generatorManifestUrl, interpolation, manifestUrl, repair, repairManifestUrl);
       publishResult(result);
     } catch (error: unknown) {
       if (error instanceof DOMException && error.name === 'AbortError') {
