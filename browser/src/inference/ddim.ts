@@ -114,7 +114,7 @@ export async function runDdimLoop(
   noiseSource: NoiseSource | null = null,
   onStep: ((completed: number, total: number) => void) | null = null,
 ): Promise<Float32Array> {
-  let sample = initialSample.slice();
+  let sample: Float32Array<ArrayBufferLike> = initialSample.slice();
   for (let index = 0; index < schedule.length; index += 1) {
     const step = schedule[index];
     if (!step) throw new Error('DDIM schedule contains an empty step.');
