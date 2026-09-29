@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
+import { parseInferenceWorkerRequest } from '../src/inference-worker-protocol.js';
 import { BROWSER_MODEL_CATALOG, browserModelDefinition } from '../src/inference/catalog.js';
 import { ddimStep, makeUniformDdimSchedule } from '../src/inference/ddim.js';
 import { dilatePlane } from '../src/inference/propainter-mask.js';
@@ -31,6 +32,41 @@ describe('browser model catalogue', () => {
 
   test('ProPainter remains explicitly licence-gated', () => {
     expect(browserModelDefinition('propainter').status).toBe('licence-gated');
+  });
+});
+
+describe('persistent inference worker protocol', () => {
+  test('accepts a strictly shaped RIFE request', () => {
+    const request = parseInferenceWorkerRequest({
+      type: 'start-rife',
+      jobId: 'job-1',
+      frames: [{ width: 1, height: 1, buffer: new ArrayBuffer(4) }],
+      durations: [100],
+      fallbackDuration: 100,
+      multiplier: 2,
+    });
+    expect(request.type).toBe('start-rife');
+    if (request.type !== 'start-rife') throw new Error('Unexpected request type.');
+    expect(request.frames).toHaveLength(1);
+    expect(request.multiplier).toBe(2);
+  });
+
+  test('accepts cancellation without model payload', () => {
+    expect(parseInferenceWorkerRequest({ type: 'cancel', jobId: 'job-2' })).toEqual({
+      type: 'cancel',
+      jobId: 'job-2',
+    });
+  });
+
+  test('rejects malformed frame buffers and multipliers', () => {
+    expect(() => parseInferenceWorkerRequest({
+      type: 'start-rife',
+      jobId: 'job-3',
+      frames: [{ width: 2, height: 2, buffer: new ArrayBuffer(4) }],
+      durations: [100],
+      fallbackDuration: 100,
+      multiplier: 3,
+    })).toThrow();
   });
 });
 
