@@ -1,0 +1,113 @@
+name: Browser adaptive Pages
+
+on:
+  push:
+    branches: [feat/browser-adaptive-wasm]
+    paths:
+      - 'browser/**'
+      - '.github/workflows/browser-pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: browser-adaptive-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install browser build dependencies
+        working-directory: browser
+        run: bun install
+
+      - name: Enforce strict TypeScript and no loose types
+        working-directory: browser
+        run: |
+          bun run test:strict-types
+          bun run typecheck
+
+      - name: Transpile TypeScript runtime
+        working-directory: browser
+        run: bun run build
+
+      - name: Set up Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 4.0.15
+          actions-cache-folder: emsdk-cache
+
+      - name: Build scalar WebAssembly alignment kernel
+        run: |
+          mkdir -p browser/dist/assets
+          em++ browser/wasm/alignment.cpp \
+            -std=c++17 -O3 --no-entry \
+            -sENVIRONMENT=worker \
+            -sMODULARIZE=1 \
+            -sEXPORT_ES6=1 \
+            -sALLOW_MEMORY_GROWTH=1 \
+            -sFILESYSTEM=0 \
+            -sEXPORTED_FUNCTIONS='["_malloc","_free","_score_translation"]' \
+            -sEXPORTED_RUNTIME_METHODS='["HEAPU8"]' \
+            -o browser/dist/assets/alignment-wasm.js
+
+      - name: Build SIMD WebAssembly alignment kernel
+        run: |
+          em++ browser/wasm/alignment.cpp \
+            -std=c++17 -O3 -msimd128 --no-entry \
+            -sENVIRONMENT=worker \
+            -sMODULARIZE=1 \
+            -sEXPORT_ES6=1 \
+            -sALLOW_MEMORY_GROWTH=1 \
+            -sFILESYSTEM=0 \
+            -sEXPORTED_FUNCTIONS='["_malloc","_free","_score_translation"]' \
+            -sEXPORTED_RUNTIME_METHODS='["HEAPU8"]' \
+            -o browser/dist/assets/alignment-wasm-simd.js
+
+      - name: Assemble static site
+        run: |
+          rm -rf browser/site
+          mkdir -p browser/site
+          cp browser/index.html browser/app.css browser/site/
+          cp -R browser/dist browser/site/dist
+          cp browser/dist/src/coi-serviceworker.js browser/site/coi-serviceworker.js
+          touch browser/site/.nojekyll
+
+      - name: Verify generated runtime is JavaScript-only at deployment boundary
+        run: |
+          test -f browser/site/dist/src/app.js
+          test -f browser/site/dist/src/alignment-worker.js
+          test -f browser/site/dist/assets/alignment-wasm.wasm
+          test -f browser/site/dist/assets/alignment-wasm-simd.wasm
+          test -z "$(find browser/site -type f -name '*.ts' -print -quit)"
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: browser/site
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

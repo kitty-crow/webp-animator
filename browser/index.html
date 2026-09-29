@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>WebP Animator · local adaptive build</title>
+  <link rel="stylesheet" href="./app.css">
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">Experimental browser-native branch</p>
+      <h1>WebP Animator</h1>
+      <p>Frames are processed on the device visiting this page. No render server is required.</p>
+      <p class="preflight"><span class="pulse" aria-hidden="true"></span><span id="preflight-status">Starting automatic hardware pre-flight…</span></p>
+    </header>
+
+    <section class="card">
+      <h2>Source frames</h2>
+      <label class="file-picker">
+        <span>Select raster frames or one animated WebP</span>
+        <input id="frames" type="file" accept="image/*,.webp" multiple>
+      </label>
+      <p class="muted">The runtime selects its own execution backend. There is deliberately no WebGPU, WebGL, WASM or threading selector.</p>
+    </section>
+
+    <section class="card settings">
+      <h2>Alignment and output</h2>
+      <label>Allowed movement
+        <select id="axis">
+          <option value="xy">X + Y</option>
+          <option value="x">X only</option>
+          <option value="y">Y only</option>
+          <option value="none">No alignment</option>
+        </select>
+      </label>
+      <label>Maximum X shift <input id="max-shift-x" type="number" min="0" value="48"></label>
+      <label>Maximum Y shift <input id="max-shift-y" type="number" min="0" value="48"></label>
+      <label>Similarity sigma <input id="sigma" type="number" min="0.01" step="0.01" value="28"></label>
+      <label>Alpha threshold <input id="alpha-threshold" type="number" min="0" max="255" value="8"></label>
+      <label>Coarse proxy max side <input id="proxy-max-side" type="number" min="32" value="256"></label>
+      <label>Frame duration (ms) <input id="duration" type="number" min="1" value="100"></label>
+      <label>Loop count <input id="loop" type="number" min="0" max="65535" value="0"></label>
+      <label>Browser WebP quality <input id="quality" type="number" min="1" max="100" value="95"></label>
+    </section>
+
+    <section class="card actions">
+      <button id="run" disabled>Process locally</button>
+      <progress id="progress" value="0" max="1"></progress>
+      <p id="progress-text" class="muted">Idle</p>
+      <p id="status" role="status" aria-live="polite"></p>
+    </section>
+
+    <section class="card output">
+      <h2>Result</h2>
+      <img id="preview" hidden alt="Animated WebP preview">
+      <a id="download" class="button-link" hidden>Save animated WebP</a>
+      <pre id="results"></pre>
+    </section>
+  </main>
+
+  <footer>
+    <div id="resource-footer" class="resource-footer" aria-live="polite">
+      <strong>Hardware pre-flight pending</strong>
+      <span>Detecting GPU, CPU, memory, SIMD and worker support…</span>
+    </div>
+  </footer>
+
+  <script type="module" src="./dist/src/app.js"></script>
+</body>
+</html>

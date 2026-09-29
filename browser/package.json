@@ -1,0 +1,16 @@
+{
+  "name": "webp-animator-browser",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.json",
+    "test": "bun test tests",
+    "test:strict-types": "bun test tests/no-loose-types.test.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.23",
+    "@webgpu/types": "^0.1.65",
+    "typescript": "^5.9.2"
+  }
+}
