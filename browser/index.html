@@ -81,6 +81,18 @@
           <option value="8">8×</option>
         </select>
       </label>
+
+      <label>Temporal repair
+        <select id="repair-engine">
+          <option value="none">None</option>
+          <option value="propainter">ProPainter selective repair</option>
+        </select>
+      </label>
+      <label id="repair-manifest-field" hidden>Exported ProPainter manifest URL
+        <input id="repair-manifest-url" type="url" inputmode="url" autocomplete="off" placeholder="https://…/manifest.json">
+        <span class="muted">ProPainter weights are licence-gated and are not bundled. Use a manifest exported from weights you are permitted to use. Repair runs only on audited temporal alpha holes.</span>
+      </label>
+
       <label>Frame duration (ms) <input id="duration" type="number" min="1" value="100"></label>
       <label>Loop count <input id="loop" type="number" min="0" max="65535" value="0"></label>
       <label>Browser WebP quality <input id="quality" type="number" min="1" max="100" value="95"></label>
