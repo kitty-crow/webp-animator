@@ -10,6 +10,7 @@ import {
   type StartRifeRequest,
   type TransferFrame,
 } from './inference-worker-protocol.js';
+import { interpolateGenerativeFrames, type GenerativeInterpolationEngine } from './inference/generative-interpolation.js';
 import { RifeOnnxAdapter } from './inference/rife.js';
 import { runPreflight } from './preflight.js';
 import type { ComputeBackend, ProgressUpdate } from './types.js';
@@ -202,14 +203,13 @@ async function runRife(request: StartRifeRequest): Promise<void> {
   }
 }
 
-async function interpolateRenderFrames(
+async function interpolateRifeRenderFrames(
   request: StartRenderRequest,
   frames: readonly ImageData[],
   durations: readonly (number | null)[],
   hardware: Awaited<ReturnType<typeof detectHardware>>,
   computeBackend: ComputeBackend,
-): Promise<{ readonly frames: readonly ImageData[]; readonly durations: readonly (number | null)[]; readonly provider: 'webgpu' | 'wasm' | null }> {
-  if (request.interpolation === 'none' || frames.length < 2) return { frames, durations, provider: null };
+): Promise<{ readonly frames: readonly ImageData[]; readonly durations: readonly (number | null)[]; readonly provider: 'webgpu' | 'wasm' }> {
   const adapter = await RifeOnnxAdapter.create(hardware);
   const provider = adapter.provider;
   const total = (frames.length - 1) * (request.multiplier - 1);
@@ -244,6 +244,37 @@ async function interpolateRenderFrames(
   } finally {
     adapter.close();
   }
+}
+
+async function interpolateRenderFrames(
+  request: StartRenderRequest,
+  frames: readonly ImageData[],
+  durations: readonly (number | null)[],
+  hardware: Awaited<ReturnType<typeof detectHardware>>,
+  computeBackend: ComputeBackend,
+): Promise<{ readonly frames: readonly ImageData[]; readonly durations: readonly (number | null)[]; readonly provider: 'webgpu' | 'wasm' | null }> {
+  if (request.interpolation === 'none' || frames.length < 2) return { frames, durations, provider: null };
+  if (request.interpolation === 'rife') return interpolateRifeRenderFrames(request, frames, durations, hardware, computeBackend);
+  const manifestUrl = request.modelManifestUrl;
+  if (manifestUrl === null) throw new Error(`${request.interpolation} requires a model manifest URL.`);
+  const engine: GenerativeInterpolationEngine = request.interpolation;
+  const total = (frames.length - 1) * (request.multiplier - 1);
+  renderProgress(request.jobId, 'interpolate', 0, total, null, computeBackend, `Loading ${engine} model manifest`);
+  const result = await interpolateGenerativeFrames(
+    engine,
+    manifestUrl,
+    frames,
+    durations,
+    request.duration,
+    request.multiplier,
+    hardware,
+    (update) => {
+      ensureNotCancelled(request.jobId);
+      renderProgress(request.jobId, 'interpolate', update.current, update.total, update.provider, computeBackend, update.detail);
+    },
+    () => ensureNotCancelled(request.jobId),
+  );
+  return result;
 }
 
 async function runRender(request: StartRenderRequest): Promise<void> {
