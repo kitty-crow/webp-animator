@@ -21,12 +21,9 @@ function syntheticFrame(width: number, height: number): ImageData {
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const index = (y * width + x) * 4;
-      const r = (x * 13 + y * 7) & 0xff;
-      const g = (x * 3 + y * 17) & 0xff;
-      const b = (x * 19 + y * 5) & 0xff;
-      image.data[index] = r;
-      image.data[index + 1] = g;
-      image.data[index + 2] = b;
+      image.data[index] = (x * 13 + y * 7) & 0xff;
+      image.data[index + 1] = (x * 3 + y * 17) & 0xff;
+      image.data[index + 2] = (x * 19 + y * 5) & 0xff;
       image.data[index + 3] = 255;
     }
   }
@@ -35,9 +32,7 @@ function syntheticFrame(width: number, height: number): ImageData {
 
 function candidateGrid(radius: number): Int32Array {
   const pairs: number[] = [];
-  for (let dy = -radius; dy <= radius; dy += 1) {
-    for (let dx = -radius; dx <= radius; dx += 1) pairs.push(dx, dy);
-  }
+  for (let dy = -radius; dy <= radius; dy += 1) for (let dx = -radius; dx <= radius; dx += 1) pairs.push(dx, dy);
   return new Int32Array(pairs);
 }
 
@@ -69,13 +64,7 @@ async function benchmark(backend: ComputeBackend, scorer: Scorer): Promise<Prefl
     const elapsed = performance.now() - started;
     const winner = winningCandidate(candidates, scores);
     const passed = winner.dx === 0 && winner.dy === 0 && Number.isFinite(winner.score);
-    return {
-      backend,
-      milliseconds: elapsed,
-      score: winner.score,
-      passed,
-      error: passed ? null : `Self-test selected ${winner.dx},${winner.dy} instead of 0,0.`,
-    };
+    return { backend, milliseconds: elapsed, score: winner.score, passed, error: passed ? null : `Self-test selected ${winner.dx},${winner.dy} instead of 0,0.` };
   } catch (error: unknown) {
     return { backend, milliseconds: Number.POSITIVE_INFINITY, score: Number.NEGATIVE_INFINITY, passed: false, error: errorMessage(error) };
   } finally {
@@ -86,25 +75,23 @@ async function benchmark(backend: ComputeBackend, scorer: Scorer): Promise<Prefl
 async function workerBenchmark(profile: HardwareProfile, backend: ComputeBackend): Promise<PreflightBenchmark> {
   const preferWasm = backend === 'wasm-simd-workers' || backend === 'wasm-workers';
   const preferSimd = backend === 'wasm-simd-workers';
-  const pool = new AlignmentWorkerPool(profile, { preferWasm, preferSimd, workerCount: profile.workerCount });
-  return benchmark(backend, pool);
+  return benchmark(backend, new AlignmentWorkerPool(profile, { preferWasm, preferSimd, workerCount: profile.workerCount }));
 }
 
 export async function runPreflight(): Promise<PreflightResult> {
   const profile = await detectHardware();
   const tests: Promise<PreflightBenchmark>[] = [];
+  const adapter = profile.webgpu.adapter;
 
-  if (profile.webgpu.available && profile.webgpu.adapter) {
+  if (profile.webgpu.available && adapter !== null) {
     tests.push((async (): Promise<PreflightBenchmark> => {
       try {
-        const scorer = await WebGpuScorer.create(profile.webgpu.adapter);
-        return benchmark('webgpu', scorer);
+        return benchmark('webgpu', await WebGpuScorer.create(adapter));
       } catch (error: unknown) {
         return { backend: 'webgpu', milliseconds: Number.POSITIVE_INFINITY, score: Number.NEGATIVE_INFINITY, passed: false, error: errorMessage(error) };
       }
     })());
   }
-
   if (profile.workerSupport && profile.wasm && profile.wasmSimd) tests.push(workerBenchmark(profile, 'wasm-simd-workers'));
   if (profile.workerSupport && profile.wasm) tests.push(workerBenchmark(profile, 'wasm-workers'));
   if (profile.workerSupport) tests.push(workerBenchmark(profile, 'js-workers'));
