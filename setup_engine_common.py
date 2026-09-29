@@ -158,19 +158,19 @@ def validate_cuda_runtime(python: Path, expected_prefix: str, *, require_cupy: b
 def install_optional_xformers(python: Path, version: str = "0.0.22.post7") -> bool:
     """Install xFormers only when its actual attention kernel works on this GPU.
 
-    Several upstream video-diffusion repos switch to xFormers merely because it can
-    be imported. On older Pascal GPUs a wheel can import successfully yet have no
-    memory-efficient-attention kernel for the device, which causes inference to fail
-    much later. Exercise the exact operation now; when unsupported, uninstall the
-    optional package so upstream's built-in ordinary-PyTorch attention fallback is
-    selected instead.
+    Several upstream video-diffusion repos select xFormers from static defaults rather
+    than from a successful runtime kernel probe. On older Pascal GPUs a wheel can
+    import successfully yet have no memory-efficient-attention kernel for the device.
+    Exercise the exact operation here. If unsupported, uninstall xFormers; engine
+    integrations that support PyTorch attention must explicitly select that backend
+    at model-construction time instead of assuming upstream will do it automatically.
     """
     completed = run(
         [python, "-m", "pip", "install", f"xformers=={version}"],
         check=False,
     )
     if completed.returncode != 0:
-        print("WARNING: xFormers could not be installed; using ordinary PyTorch attention.")
+        print("WARNING: xFormers could not be installed; engine integration must use PyTorch attention.")
         return False
 
     probe = subprocess.run(
@@ -200,5 +200,5 @@ def install_optional_xformers(python: Path, version: str = "0.0.22.post7") -> bo
     if details:
         print(details[-1200:])
     run([python, "-m", "pip", "uninstall", "-y", "xformers"], check=False)
-    print("Using upstream's ordinary PyTorch attention fallback instead.")
+    print("xFormers disabled; the engine integration must select its PyTorch attention path.")
     return False
