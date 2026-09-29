@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import { parseInferenceWorkerRequest } from '../src/inference-worker-protocol.js';
 import { BROWSER_MODEL_CATALOG, browserModelDefinition } from '../src/inference/catalog.js';
 import { ddimStep, makeUniformDdimSchedule } from '../src/inference/ddim.js';
+import { DEFAULT_MOG_SCHEDULE, makeMogDdimSchedule, mogDdimStep, mogTimesteps, mogVPrediction } from '../src/inference/mog-scheduler.js';
 import { dilatePlane } from '../src/inference/propainter-mask.js';
 import { initialiseResShiftSample, makeResShiftSchedule, resShiftReverseStep } from '../src/inference/resshift-scheduler.js';
 
@@ -84,6 +85,42 @@ describe('DDIM browser scheduler', () => {
       { alpha: 0.5, alphaPrevious: 0.8, eta: 0 },
     );
     expect(output).toHaveLength(3);
+    for (const value of output) expect(Number.isFinite(value)).toBe(true);
+  });
+});
+
+describe('MoG browser v-prediction DDIM scheduler', () => {
+  test('matches upstream uniform_trailing 50-of-1000 timestep selection', () => {
+    const timesteps = Array.from(mogTimesteps(DEFAULT_MOG_SCHEDULE));
+    expect(timesteps).toHaveLength(50);
+    expect(timesteps[0]).toBe(19);
+    expect(timesteps[1]).toBe(39);
+    expect(timesteps[48]).toBe(979);
+    expect(timesteps[49]).toBe(999);
+  });
+
+  test('v prediction converts to x0 and epsilon with the standard identities', () => {
+    const sample = new Float32Array([0.5, -0.25]);
+    const velocity = new Float32Array([0.1, 0.3]);
+    const alpha = 0.64;
+    const prediction = mogVPrediction(sample, velocity, alpha);
+    expect(prediction.predictedX0[0]).toBeCloseTo(0.34, 6);
+    expect(prediction.epsilon[0]).toBeCloseTo(0.38, 6);
+    expect(prediction.predictedX0[1]).toBeCloseTo(-0.38, 6);
+    expect(prediction.epsilon[1]).toBeCloseTo(0.09, 6);
+  });
+
+  test('50-step eta-1 schedule remains finite after one stochastic step', () => {
+    const schedule = makeMogDdimSchedule(DEFAULT_MOG_SCHEDULE);
+    expect(schedule).toHaveLength(50);
+    const latest = schedule.at(-1);
+    if (!latest) throw new Error('MoG schedule unexpectedly empty.');
+    const output = mogDdimStep(
+      new Float32Array([0.2, -0.4, 0.7]),
+      new Float32Array([0.1, 0.05, -0.2]),
+      latest,
+      new Float32Array([0.3, -0.1, 0.2]),
+    );
     for (const value of output) expect(Number.isFinite(value)).toBe(true);
   });
 });
