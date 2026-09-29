@@ -47,6 +47,19 @@
       <label>Similarity sigma <input id="sigma" type="number" min="0.01" step="0.01" value="28"></label>
       <label>Alpha threshold <input id="alpha-threshold" type="number" min="0" max="255" value="8"></label>
       <label>Coarse proxy max side <input id="proxy-max-side" type="number" min="32" value="256"></label>
+
+      <label>Midpoint generator
+        <select id="frame-generator">
+          <option value="none">None</option>
+          <option value="eden">EDEN</option>
+          <option value="speed">SPEED</option>
+        </select>
+      </label>
+      <label id="generator-manifest-field" hidden>Exported generator manifest URL
+        <input id="generator-manifest-url" type="url" inputmode="url" autocomplete="off" placeholder="https://…/manifest.json">
+        <span class="muted">EDEN and SPEED run before interpolation. Their ONNX graphs are loaded from the exported manifest and selected automatically for WebGPU or WASM.</span>
+      </label>
+
       <label>Interpolation model
         <select id="interpolation-engine">
           <option value="none">None</option>
@@ -57,7 +70,7 @@
           <option value="tooncrafter">ToonCrafter</option>
         </select>
       </label>
-      <label id="model-manifest-field" hidden>Exported model manifest URL
+      <label id="model-manifest-field" hidden>Exported interpolation manifest URL
         <input id="model-manifest-url" type="url" inputmode="url" autocomplete="off" placeholder="https://…/manifest.json">
         <span class="muted">The manifest points to exported ONNX graphs and their SHA-256-verified external-data shards. The URL is remembered only in this browser.</span>
       </label>
