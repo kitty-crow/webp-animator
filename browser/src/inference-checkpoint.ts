@@ -81,7 +81,7 @@ function checkpointFromUnknown(value: unknown, jobId: string): InferenceCheckpoi
   if (model !== 'rife' && model !== 'pipeline') return null;
   if (status !== 'running' && status !== 'completed' && status !== 'cancelled' && status !== 'failed') return null;
   if (provider !== null && provider !== 'webgpu' && provider !== 'wasm') return null;
-  if (stage !== undefined && stage !== 'initialising' && stage !== 'preflight' && stage !== 'decode' && stage !== 'align' && stage !== 'interpolate' && stage !== 'encode') return null;
+  if (stage !== undefined && stage !== 'initialising' && stage !== 'preflight' && stage !== 'decode' && stage !== 'align' && stage !== 'generate' && stage !== 'interpolate' && stage !== 'encode') return null;
   const current = record['current'];
   const total = record['total'];
   const updatedAt = record['updatedAt'];
