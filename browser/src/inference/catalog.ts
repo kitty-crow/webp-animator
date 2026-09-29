@@ -1,6 +1,6 @@
 export type BrowserModelStatus =
   | 'adapter-ready'
-  | 'component-export-required'
+  | 'adapter-ready-assets-required'
   | 'export-required'
   | 'licence-gated';
 
@@ -70,48 +70,64 @@ export const BROWSER_MODEL_CATALOG: readonly BrowserModelDefinition[] = [
     notes: 'Exact 4.25 generation used by the native worker. The browser adapter accepts the v2 7-channel ONNX graph and runs alpha through the same network when required.',
   },
   {
-    family: 'resshift',
-    label: 'Multi-Input ResShift',
-    status: 'component-export-required',
+    family: 'amt',
+    label: 'AMT-S',
+    status: 'adapter-ready-assets-required',
     preferredProvider: 'webgpu',
     fallbackProvider: 'wasm',
     assets: [],
     components: [
-      { id: 'flow', purpose: 'Endpoint optical-flow estimation', exportFormat: 'onnx' },
-      { id: 'reverse-denoiser', purpose: 'Residual-shifting reverse diffusion step', exportFormat: 'onnx' },
+      { id: 'scale100', purpose: 'Full-scale arbitrary-timestep interpolation', exportFormat: 'onnx' },
+      { id: 'scale075', purpose: '0.75× low-memory interpolation fallback', exportFormat: 'onnx' },
+      { id: 'scale050', purpose: '0.5× low-memory interpolation fallback', exportFormat: 'onnx' },
+      { id: 'scale025', purpose: '0.25× low-memory interpolation fallback', exportFormat: 'onnx' },
     ],
-    notes: 'The released path contains CUDA/CuPy warping. Browser parity requires replacing those warps with ONNX GridSample-compatible graph operations and keeping the reverse-process loop in TypeScript.',
+    notes: 'The browser exporter emits the same four internal scale factors used by the native low-VRAM worker. The UI consumes a manifest containing hashes, sizes and external-data shard locations. Upstream AMT is CC-BY-NC-4.0.',
+  },
+  {
+    family: 'resshift',
+    label: 'Multi-Input ResShift',
+    status: 'adapter-ready-assets-required',
+    preferredProvider: 'webgpu',
+    fallbackProvider: 'wasm',
+    assets: [],
+    components: [
+      { id: 'flow', purpose: 'Bidirectional endpoint optical-flow estimation', exportFormat: 'onnx' },
+      { id: 'extractor', purpose: 'Multi-scale endpoint feature extraction', exportFormat: 'onnx' },
+      { id: 'synthesis', purpose: 'Residual-shifting synthesis denoiser', exportFormat: 'onnx' },
+    ],
+    notes: 'CUDA/CuPy-only softmax splatting and NEDT are replaced by browser implementations. Flow, feature extraction and synthesis are exported offline, while the exact reverse diffusion process remains in strict TypeScript.',
   },
   {
     family: 'mog',
     label: 'Motion-Aware Generative VFI',
-    status: 'component-export-required',
+    status: 'adapter-ready-assets-required',
     preferredProvider: 'webgpu',
     fallbackProvider: 'wasm',
     assets: [],
     components: [
-      { id: 'ema-vfi', purpose: 'Motion/flow guidance', exportFormat: 'onnx' },
-      { id: 'vae-encoder', purpose: 'Frame-to-latent encoding', exportFormat: 'onnx' },
-      { id: 'video-denoiser', purpose: 'Latent video denoising step', exportFormat: 'onnx' },
-      { id: 'vae-decoder', purpose: 'Latent-to-frame decoding', exportFormat: 'onnx' },
+      { id: 'motion', purpose: 'EMA-VFI motion and flow guidance', exportFormat: 'onnx' },
+      { id: 'vae-encoder', purpose: 'Endpoint latent and reference-context encoding', exportFormat: 'onnx' },
+      { id: 'image-condition', purpose: 'Image conditioning and projection', exportFormat: 'onnx' },
+      { id: 'denoiser', purpose: 'Latent video v-prediction step', exportFormat: 'onnx' },
+      { id: 'vae-decoder', purpose: 'Reference-aware latent decoding', exportFormat: 'onnx' },
     ],
-    notes: 'The DDIM loop belongs in TypeScript. Splitting the graph allows component offload and avoids requiring the whole PyTorch model in memory at once.',
+    notes: 'The browser owns latent warping, 50-step eta-1 DDIM, v-prediction, dynamic rescaling and component offload. The exporter precomputes runtime-invariant empty text conditioning and emits hash-verified external-data shards.',
   },
   {
     family: 'tooncrafter',
     label: 'ToonCrafter',
-    status: 'component-export-required',
+    status: 'adapter-ready-assets-required',
     preferredProvider: 'webgpu',
     fallbackProvider: 'wasm',
     assets: [],
     components: [
       { id: 'vae-encoder', purpose: 'Endpoint latent and reference-context encoding', exportFormat: 'onnx' },
-      { id: 'image-embedder', purpose: 'Endpoint image conditioning', exportFormat: 'onnx' },
-      { id: 'image-projector', purpose: 'Image-conditioning projection', exportFormat: 'onnx' },
-      { id: 'video-denoiser', purpose: 'Latent video denoising step', exportFormat: 'onnx' },
+      { id: 'image-condition', purpose: 'Endpoint image conditioning and projection', exportFormat: 'onnx' },
+      { id: 'denoiser', purpose: 'Latent video v-prediction step', exportFormat: 'onnx' },
       { id: 'vae-decoder', purpose: 'Context-aware latent decoding', exportFormat: 'onnx' },
     ],
-    notes: 'Empty text conditioning can be precomputed. The large checkpoint should be split into ONNX external-data shards and cached locally rather than bundled into the Pages repository.',
+    notes: 'The browser keeps the native width-dependent DDIM spacing and dynamic rescale policy. Empty text conditioning is exported as runtime-invariant data and large tensors are externalised for lazy verified caching.',
   },
   {
     family: 'propainter',
@@ -129,24 +145,14 @@ export const BROWSER_MODEL_CATALOG: readonly BrowserModelDefinition[] = [
     notes: 'The mask audit/dilation is suitable for TypeScript/WebGPU. Upstream ProPainter weights are non-commercial, so the browser build must not silently redistribute them without respecting that licence.',
   },
   {
-    family: 'amt',
-    label: 'AMT',
-    status: 'export-required',
-    preferredProvider: 'webgpu',
-    fallbackProvider: 'wasm',
-    assets: [],
-    components: [{ id: 'interpolator', purpose: 'Arbitrary-timestep interpolation', exportFormat: 'onnx' }],
-    notes: 'A single-graph ONNX adapter should be sufficient once the current checkpoint is exported and verified.',
-  },
-  {
     family: 'eden',
     label: 'EDEN',
     status: 'export-required',
     preferredProvider: 'webgpu',
     fallbackProvider: 'wasm',
     assets: [],
-    components: [{ id: 'interpolator', purpose: 'Frame generation/interpolation', exportFormat: 'onnx' }],
-    notes: 'Requires a model-specific export audit before the browser adapter can be enabled.',
+    components: [{ id: 'generator', purpose: 'Structural midpoint frame generation', exportFormat: 'onnx' }],
+    notes: 'EDEN is a generator stage in the native pipeline, not an interpolation-engine peer. It needs a model-specific export/runtime audit before the separate browser generator stage can be enabled.',
   },
   {
     family: 'speed',
@@ -155,8 +161,8 @@ export const BROWSER_MODEL_CATALOG: readonly BrowserModelDefinition[] = [
     preferredProvider: 'webgpu',
     fallbackProvider: 'wasm',
     assets: [],
-    components: [{ id: 'interpolator', purpose: 'Frame interpolation', exportFormat: 'onnx' }],
-    notes: 'Requires a model-specific export audit before the browser adapter can be enabled.',
+    components: [{ id: 'generator', purpose: 'Structural midpoint frame generation', exportFormat: 'onnx' }],
+    notes: 'SPEED is a generator stage in the native pipeline, not an interpolation-engine peer. It needs a model-specific export/runtime audit before the separate browser generator stage can be enabled.',
   },
 ];
 
