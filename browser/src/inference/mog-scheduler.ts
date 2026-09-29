@@ -6,6 +6,9 @@ export interface MogScheduleConfig {
   readonly eta: number;
   readonly zeroTerminalSnr: boolean;
   readonly spacing: 'uniform' | 'uniform_trailing';
+  readonly dynamicRescale?: boolean;
+  readonly baseScale?: number;
+  readonly turningStep?: number;
 }
 
 export interface MogDdimStep {
@@ -13,6 +16,8 @@ export interface MogDdimStep {
   readonly alpha: number;
   readonly alphaPrevious: number;
   readonly sigma: number;
+  readonly dynamicScale: number;
+  readonly dynamicScalePrevious: number;
 }
 
 export interface MogDdimPrediction {
@@ -28,6 +33,9 @@ export const DEFAULT_MOG_SCHEDULE: MogScheduleConfig = {
   eta: 1,
   zeroTerminalSnr: true,
   spacing: 'uniform_trailing',
+  dynamicRescale: true,
+  baseScale: 0.7,
+  turningStep: 400,
 };
 
 function requirePositive(value: number, label: string): void {
@@ -111,6 +119,20 @@ export function mogTimesteps(config: MogScheduleConfig = DEFAULT_MOG_SCHEDULE): 
   return new Int32Array(selected);
 }
 
+export function mogDynamicScale(trainingTimestep: number, config: MogScheduleConfig = DEFAULT_MOG_SCHEDULE): number {
+  if (!Number.isInteger(trainingTimestep) || trainingTimestep < 0 || trainingTimestep >= config.trainingTimesteps) {
+    throw new Error('MoG dynamic-rescale timestep is invalid.');
+  }
+  if (config.dynamicRescale === false) return 1;
+  const baseScale = config.baseScale ?? 0.7;
+  const turningStep = config.turningStep ?? 400;
+  if (!Number.isFinite(baseScale) || baseScale <= 0) throw new Error('MoG baseScale must be positive.');
+  if (!Number.isInteger(turningStep) || turningStep < 2) throw new Error('MoG turningStep must be an integer of at least two.');
+  if (trainingTimestep >= turningStep) return baseScale;
+  const ratio = trainingTimestep / (turningStep - 1);
+  return 1 + (baseScale - 1) * ratio;
+}
+
 export function makeMogDdimSchedule(config: MogScheduleConfig = DEFAULT_MOG_SCHEDULE): readonly MogDdimStep[] {
   requirePositive(config.eta, 'MoG DDIM eta');
   const alphaCumprod = alphaCumprodForMog(config);
@@ -131,7 +153,11 @@ export function makeMogDdimSchedule(config: MogScheduleConfig = DEFAULT_MOG_SCHE
       Math.max(0, (1 - alphaPrevious) / Math.max(1e-20, 1 - alpha))
       * Math.max(0, 1 - alpha / Math.max(alphaPrevious, 1e-20)),
     );
-    steps.push({ trainingTimestep: timestep, alpha, alphaPrevious, sigma });
+    const dynamicScale = mogDynamicScale(timestep, config);
+    const dynamicScalePrevious = previousTimestep === null
+      ? dynamicScale
+      : mogDynamicScale(previousTimestep, config);
+    steps.push({ trainingTimestep: timestep, alpha, alphaPrevious, sigma, dynamicScale, dynamicScalePrevious });
   }
   return steps;
 }
@@ -164,11 +190,13 @@ export function mogDdimStep(
 ): Float32Array {
   if (sample.length !== noise.length) throw new Error('MoG DDIM noise shape differs from the sample.');
   const prediction = mogVPrediction(sample, velocity, step.alpha);
+  const rescale = step.dynamicScalePrevious / step.dynamicScale;
+  if (!Number.isFinite(rescale) || rescale <= 0) throw new Error('MoG dynamic DDIM rescale is invalid.');
   const directionScale = Math.sqrt(Math.max(0, 1 - step.alphaPrevious - step.sigma * step.sigma));
   const previousOriginalScale = Math.sqrt(step.alphaPrevious);
   const output = new Float32Array(sample.length);
   for (let index = 0; index < output.length; index += 1) {
-    output[index] = previousOriginalScale * (prediction.predictedX0[index] ?? 0)
+    output[index] = previousOriginalScale * (prediction.predictedX0[index] ?? 0) * rescale
       + directionScale * (prediction.epsilon[index] ?? 0)
       + step.sigma * (noise[index] ?? 0);
   }
