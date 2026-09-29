@@ -5,6 +5,7 @@ import type {
   RenderInterpolationEngine,
   RenderProgressStage,
   RifeMultiplier,
+  TemporalRepairEngine,
   TransferFrame,
 } from './inference-worker-protocol.js';
 import type { ComputeBackend, RegistrationSettings, ShiftResult } from './types.js';
@@ -116,7 +117,7 @@ function parseShiftResult(value: unknown): ShiftResult {
 }
 
 function parseRenderStage(value: unknown): RenderProgressStage {
-  if (value === 'preflight' || value === 'decode' || value === 'align' || value === 'generate' || value === 'interpolate' || value === 'encode') return value;
+  if (value === 'preflight' || value === 'decode' || value === 'align' || value === 'generate' || value === 'interpolate' || value === 'repair' || value === 'encode') return value;
   throw new Error('Inference worker render stage is invalid.');
 }
 
@@ -273,6 +274,8 @@ export class InferenceWorkerClient {
     generatorManifestUrl: string | null,
     interpolation: RenderInterpolationEngine,
     modelManifestUrl: string | null,
+    repair: TemporalRepairEngine,
+    repairManifestUrl: string | null,
     multiplier: RifeMultiplier,
     duration: number,
     loop: number,
@@ -291,6 +294,8 @@ export class InferenceWorkerClient {
       generatorManifestUrl,
       interpolation,
       modelManifestUrl,
+      repair,
+      repairManifestUrl,
       multiplier,
       duration,
       loop,
