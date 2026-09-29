@@ -76,9 +76,17 @@ export function floatTensor(data: Float32Array, dimensions: readonly number[]): 
   return new ort.Tensor('float32', data, [...dimensions]);
 }
 
+export function int64Tensor(data: BigInt64Array, dimensions: readonly number[]): ort.Tensor {
+  return new ort.Tensor('int64', data, [...dimensions]);
+}
+
 export function tensorFloatData(tensor: ort.Tensor): Float32Array {
   if (!(tensor.data instanceof Float32Array)) {
     throw new Error(`Expected float32 ONNX output, received ${tensor.type}.`);
   }
   return tensor.data;
+}
+
+export function tensorDimensions(tensor: ort.Tensor): readonly number[] {
+  return tensor.dims.map((value) => Number(value));
 }
