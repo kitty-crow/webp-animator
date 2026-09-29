@@ -115,7 +115,7 @@ function parseShiftResult(value: unknown): ShiftResult {
 }
 
 function parseRenderStage(value: unknown): RenderProgressStage {
-  if (value === 'preflight' || value === 'decode' || value === 'align' || value === 'interpolate' || value === 'encode') return value;
+  if (value === 'preflight' || value === 'decode' || value === 'align' || value === 'generate' || value === 'interpolate' || value === 'encode') return value;
   throw new Error('Inference worker render stage is invalid.');
 }
 
@@ -284,6 +284,8 @@ export class InferenceWorkerClient {
       jobId: id,
       files,
       registration,
+      generator: 'none',
+      generatorManifestUrl: null,
       interpolation,
       modelManifestUrl,
       multiplier,
