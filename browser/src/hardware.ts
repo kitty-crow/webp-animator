@@ -26,9 +26,12 @@ function errorMessage(error: unknown): string {
 
 function probeWebGl2(): WebGlCapability {
   try {
-    const canvas: OffscreenCanvas | HTMLCanvasElement = typeof OffscreenCanvas === 'function'
+    const canvas: OffscreenCanvas | HTMLCanvasElement | null = typeof OffscreenCanvas === 'function'
       ? new OffscreenCanvas(2, 2)
-      : document.createElement('canvas');
+      : typeof document !== 'undefined'
+        ? document.createElement('canvas')
+        : null;
+    if (!canvas) return { available: false, renderer: null, maxTextureSize: 0, error: null };
     const context = canvas.getContext('webgl2', {
       alpha: false,
       antialias: false,
