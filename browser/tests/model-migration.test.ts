@@ -2,8 +2,8 @@ import { describe, expect, test } from 'bun:test';
 
 import { parseInferenceWorkerRequest } from '../src/inference-worker-protocol.js';
 import { BROWSER_MODEL_CATALOG, browserModelDefinition } from '../src/inference/catalog.js';
-import { ddimStep, makeUniformDdimSchedule } from '../src/inference/ddim.js';
-import { DEFAULT_MOG_SCHEDULE, makeMogDdimSchedule, mogDdimStep, mogTimesteps, mogVPrediction } from '../src/inference/mog-scheduler.js';
+import { ddimStep, makeLegacyLdmUniformDdimSchedule, makeUniformDdimSchedule } from '../src/inference/ddim.js';
+import { DEFAULT_MOG_SCHEDULE, makeMogDdimSchedule, mogDdimStep, mogDynamicScale, mogTimesteps, mogVPrediction } from '../src/inference/mog-scheduler.js';
 import { dilatePlane } from '../src/inference/propainter-mask.js';
 import { initialiseResShiftSample, makeResShiftSchedule, resShiftReverseStep } from '../src/inference/resshift-scheduler.js';
 
@@ -78,6 +78,15 @@ describe('DDIM browser scheduler', () => {
     expect(schedule.at(-1)?.alphaPrevious).toBe(1);
   });
 
+  test('legacy LDM uniform schedule preserves the upstream +1 timestep convention', () => {
+    const alphas = Array.from({ length: 1000 }, (_, index) => 1 - index / 2000);
+    const schedule = makeLegacyLdmUniformDdimSchedule(alphas, 50);
+    expect(schedule).toHaveLength(50);
+    expect(schedule[0]?.trainingTimestep).toBe(981);
+    expect(schedule.at(-1)?.trainingTimestep).toBe(1);
+    expect(schedule.at(-1)?.alphaPrevious).toBe(alphas[0]);
+  });
+
   test('deterministic DDIM step preserves shape and finite values', () => {
     const output = ddimStep(
       new Float32Array([0.3, -0.2, 0.8]),
@@ -97,6 +106,17 @@ describe('MoG browser v-prediction DDIM scheduler', () => {
     expect(timesteps[1]).toBe(39);
     expect(timesteps[48]).toBe(979);
     expect(timesteps[49]).toBe(999);
+  });
+
+  test('matches upstream dynamic-rescale ramp and selected previous scale', () => {
+    expect(mogDynamicScale(0)).toBeCloseTo(1, 10);
+    expect(mogDynamicScale(399)).toBeCloseTo(0.7, 10);
+    expect(mogDynamicScale(999)).toBeCloseTo(0.7, 10);
+    const schedule = makeMogDdimSchedule(DEFAULT_MOG_SCHEDULE);
+    const early = schedule.find((step) => step.trainingTimestep === 399);
+    if (!early) throw new Error('MoG 399 timestep unexpectedly absent.');
+    expect(early.dynamicScale).toBeCloseTo(0.7, 10);
+    expect(early.dynamicScalePrevious).toBeGreaterThan(early.dynamicScale);
   });
 
   test('v prediction converts to x0 and epsilon with the standard identities', () => {
