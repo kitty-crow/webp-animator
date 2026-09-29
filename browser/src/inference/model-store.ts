@@ -1,6 +1,8 @@
-import type { BrowserModelAsset } from './catalog.js';
+import type { BrowserExternalDataAsset, BrowserModelAsset } from './catalog.js';
 
 const MODEL_CACHE_NAME = 'webp-animator-models-v1';
+
+type VerifiedAsset = BrowserModelAsset | BrowserExternalDataAsset;
 
 function bytesToHex(bytes: Uint8Array): string {
   let result = '';
@@ -13,7 +15,7 @@ async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
   return bytesToHex(new Uint8Array(digest));
 }
 
-async function verifyAsset(asset: BrowserModelAsset, buffer: ArrayBuffer): Promise<void> {
+async function verifyAsset(asset: VerifiedAsset, buffer: ArrayBuffer): Promise<void> {
   if (buffer.byteLength !== asset.bytes) {
     throw new Error(
       `${asset.id} model size mismatch: expected ${asset.bytes} bytes, received ${buffer.byteLength}.`,
@@ -34,7 +36,7 @@ async function cacheStorage(): Promise<Cache | null> {
   }
 }
 
-async function readCached(asset: BrowserModelAsset, cache: Cache): Promise<Uint8Array | null> {
+async function readCached(asset: VerifiedAsset, cache: Cache): Promise<Uint8Array | null> {
   const response = await cache.match(asset.url);
   if (!response) return null;
   const buffer = await response.arrayBuffer();
@@ -47,15 +49,15 @@ async function readCached(asset: BrowserModelAsset, cache: Cache): Promise<Uint8
   }
 }
 
-async function fetchVerified(asset: BrowserModelAsset): Promise<{ readonly bytes: Uint8Array; readonly response: Response }> {
+async function fetchVerified(asset: VerifiedAsset): Promise<Uint8Array> {
   const response = await fetch(asset.url, { mode: 'cors', credentials: 'omit', cache: 'no-cache' });
   if (!response.ok) throw new Error(`Failed to download ${asset.id}: HTTP ${response.status}.`);
   const buffer = await response.arrayBuffer();
   await verifyAsset(asset, buffer);
-  return { bytes: new Uint8Array(buffer), response };
+  return new Uint8Array(buffer);
 }
 
-export async function loadModelBytes(asset: BrowserModelAsset): Promise<Uint8Array> {
+export async function loadVerifiedAssetBytes(asset: VerifiedAsset): Promise<Uint8Array> {
   const cache = await cacheStorage();
   if (cache) {
     const cached = await readCached(asset, cache);
@@ -67,7 +69,7 @@ export async function loadModelBytes(asset: BrowserModelAsset): Promise<Uint8Arr
     try {
       await cache.put(
         asset.url,
-        new Response(downloaded.bytes.slice().buffer, {
+        new Response(downloaded.slice().buffer, {
           headers: {
             'content-type': 'application/octet-stream',
             'x-webp-animator-sha256': asset.sha256,
@@ -78,7 +80,15 @@ export async function loadModelBytes(asset: BrowserModelAsset): Promise<Uint8Arr
       // Cache quota or private-browsing restrictions must never make inference fail.
     }
   }
-  return downloaded.bytes;
+  return downloaded;
+}
+
+export async function loadModelBytes(asset: BrowserModelAsset): Promise<Uint8Array> {
+  return loadVerifiedAssetBytes(asset);
+}
+
+export async function loadExternalDataBytes(asset: BrowserExternalDataAsset): Promise<Uint8Array> {
+  return loadVerifiedAssetBytes(asset);
 }
 
 export async function clearBrowserModelCache(): Promise<boolean> {
