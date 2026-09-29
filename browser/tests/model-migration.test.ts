@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import { BROWSER_MODEL_CATALOG, browserModelDefinition } from '../src/inference/catalog.js';
 import { ddimStep, makeUniformDdimSchedule } from '../src/inference/ddim.js';
 import { dilatePlane } from '../src/inference/propainter-mask.js';
+import { initialiseResShiftSample, makeResShiftSchedule, resShiftReverseStep } from '../src/inference/resshift-scheduler.js';
 
 describe('browser model catalogue', () => {
   test('model families are unique and use automatic WebGPU to WASM fallback', () => {
@@ -48,6 +49,44 @@ describe('DDIM browser scheduler', () => {
     );
     expect(output).toHaveLength(3);
     for (const value of output) expect(Number.isFinite(value)).toBe(true);
+  });
+});
+
+describe('ResShift browser scheduler', () => {
+  const schedule = makeResShiftSchedule({
+    timesteps: 20,
+    kappa: 2,
+    p: 0.3,
+    minNoiseLevel: 0.04,
+    etasEnd: 0.99,
+  });
+
+  test('matches upstream schedule endpoints', () => {
+    expect(schedule.sqrtSumEta).toHaveLength(20);
+    expect(schedule.sqrtSumEta[0]).toBeCloseTo(0.02, 10);
+    expect(schedule.sqrtSumEta[19]).toBeCloseTo(0.99, 10);
+    expect(schedule.sumPreviousEta[0]).toBe(0);
+    expect(schedule.backwardStd[0]).toBe(0);
+  });
+
+  test('deterministic initial and reverse samples remain finite', () => {
+    const endpoints = {
+      first: new Float32Array([-1, 0, 1]),
+      second: new Float32Array([1, 0.5, -1]),
+      tau: 0.25,
+    } as const;
+    const zeroNoise = new Float32Array(3);
+    const initial = initialiseResShiftSample(endpoints, schedule, 2, zeroNoise);
+    const previous = resShiftReverseStep(
+      initial,
+      new Float32Array([0.2, 0.1, -0.3]),
+      endpoints,
+      schedule,
+      19,
+      zeroNoise,
+    );
+    expect(previous).toHaveLength(3);
+    for (const value of previous) expect(Number.isFinite(value)).toBe(true);
   });
 });
 
