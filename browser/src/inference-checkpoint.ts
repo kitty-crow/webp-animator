@@ -1,15 +1,19 @@
 import type { ModelExecutionProvider } from './inference/ort-runtime.js';
+import type { RenderProgressStage } from './inference-worker-protocol.js';
 
 const DATABASE_NAME = 'webp-animator-inference-v1';
 const DATABASE_VERSION = 1;
 const STORE_NAME = 'jobs';
 
 export type InferenceCheckpointStatus = 'running' | 'completed' | 'cancelled' | 'failed';
+export type InferenceCheckpointModel = 'rife' | 'pipeline';
+export type InferenceCheckpointStage = RenderProgressStage | 'initialising';
 
 export interface InferenceCheckpoint {
   readonly jobId: string;
-  readonly model: 'rife';
+  readonly model: InferenceCheckpointModel;
   readonly status: InferenceCheckpointStatus;
+  readonly stage?: InferenceCheckpointStage;
   readonly current: number;
   readonly total: number;
   readonly provider: ModelExecutionProvider | null;
@@ -66,6 +70,37 @@ export async function writeInferenceCheckpoint(checkpoint: InferenceCheckpoint):
   }
 }
 
+function checkpointFromUnknown(value: unknown, jobId: string): InferenceCheckpoint | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const record = value as Record<string, unknown>;
+  const model = record['model'];
+  const status = record['status'];
+  const provider = record['provider'];
+  const stage = record['stage'];
+  if (record['jobId'] !== jobId) return null;
+  if (model !== 'rife' && model !== 'pipeline') return null;
+  if (status !== 'running' && status !== 'completed' && status !== 'cancelled' && status !== 'failed') return null;
+  if (provider !== null && provider !== 'webgpu' && provider !== 'wasm') return null;
+  if (stage !== undefined && stage !== 'initialising' && stage !== 'preflight' && stage !== 'decode' && stage !== 'align' && stage !== 'interpolate' && stage !== 'encode') return null;
+  const current = record['current'];
+  const total = record['total'];
+  const updatedAt = record['updatedAt'];
+  const error = record['error'];
+  if (typeof current !== 'number' || typeof total !== 'number' || typeof updatedAt !== 'number') return null;
+  if (error !== null && typeof error !== 'string') return null;
+  const base: InferenceCheckpoint = {
+    jobId,
+    model,
+    status,
+    current,
+    total,
+    provider,
+    updatedAt,
+    error,
+  };
+  return stage === undefined ? base : { ...base, stage };
+}
+
 export async function readInferenceCheckpoint(jobId: string): Promise<InferenceCheckpoint | null> {
   const database = await openDatabase();
   if (!database) return null;
@@ -73,9 +108,7 @@ export async function readInferenceCheckpoint(jobId: string): Promise<InferenceC
     const transaction = database.transaction(STORE_NAME, 'readonly');
     const result: unknown = await requestResult(transaction.objectStore(STORE_NAME).get(jobId));
     await transactionDone(transaction);
-    if (typeof result !== 'object' || result === null) return null;
-    const record = result as Partial<InferenceCheckpoint>;
-    return record.jobId === jobId && record.model === 'rife' ? record as InferenceCheckpoint : null;
+    return checkpointFromUnknown(result, jobId);
   } catch (error: unknown) {
     console.warn('Could not read inference checkpoint.', error);
     return null;
