@@ -2,7 +2,7 @@ name: Browser adaptive Pages
 
 on:
   push:
-    branches: [feat/browser-adaptive-wasm]
+    branches: [main, feat/browser-adaptive-wasm]
     paths:
       - 'browser/**'
       - '.github/workflows/browser-pages.yml'
@@ -14,7 +14,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: browser-adaptive-pages
+  group: browser-adaptive-pages-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -94,14 +94,17 @@ jobs:
           test -z "$(find browser/site -type f -name '*.ts' -print -quit)"
 
       - name: Configure Pages
+        if: github.ref == 'refs/heads/main'
         uses: actions/configure-pages@v5
 
       - name: Upload Pages artifact
+        if: github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@v3
         with:
           path: browser/site
 
   deploy:
+    if: github.ref == 'refs/heads/main'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
