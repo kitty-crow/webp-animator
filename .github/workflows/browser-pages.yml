@@ -33,10 +33,11 @@ jobs:
         working-directory: browser
         run: bun install
 
-      - name: Enforce strict TypeScript and no loose types
+      - name: Enforce strict TypeScript and browser regressions
         working-directory: browser
         run: |
           bun run test:strict-types
+          bun run test
           bun run typecheck
 
       - name: Transpile TypeScript runtime
