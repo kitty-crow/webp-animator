@@ -16,6 +16,7 @@ from PIL import Image
 # flags exported for newer RIFE/ResShift runtimes that that release cannot parse.
 os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
 
+from video_attention_compat import configure_first_stage_attention, validate_first_stage_attention
 from worker_common import (
     content_bbox,
     gap_score,
@@ -29,7 +30,7 @@ from worker_common import (
 TARGETS = ((512, 320), (448, 256), (384, 224), (320, 192), (256, 160), (224, 128))
 PREP_UNITS = 12
 DEFAULT_DDIM_STEPS = int(os.environ.get("MOG_DDIM_STEPS", "50"))
-WORKER_REVISION = "mog-selective-low-vram-v3"
+WORKER_REVISION = "mog-selective-low-vram-v4"
 
 
 class ProgressState:
@@ -197,7 +198,9 @@ def load_model(source: Path, config_path: Path, checkpoint: Path, flow_checkpoin
         config = OmegaConf.load(str(config_path))
         model_config = config.pop("model", OmegaConf.create())
         model_config["params"]["unet_config"]["params"]["use_checkpoint"] = False
+        vae_attention = configure_first_stage_attention(torch, model_config, label="MoG")
         model = instantiate_from_config(model_config)
+        validate_first_stage_attention(model, selected=vae_attention, label="MoG")
     finally:
         VFIModel.device = original_device
 
