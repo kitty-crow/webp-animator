@@ -12,7 +12,7 @@ A LAN-accessible Python web tool for building animated WebP files from raster fr
 - Optional aspect-ratio-preserving auto-shrink for frames larger than the preceding frame.
 - Fix-to-frame-1 mode that independently optimises uniform scale and X/Y pan for every frame against the first frame.
 - No source-pixel cropping during registration; the canvas expands as needed.
-- Optional Practical-RIFE 4.25 interpolation at 2x, 4x, or 8x.
+- Conventional RIFE and AMT interpolation plus optional generative VFI with Multi-Input ResShift Diffusion and MoG.
 - Durable global Job IDs with server-side source/settings/result persistence.
 - Browser IndexedDB snapshots of the current workspace and final WebP.
 - Animated final-WebP preview and repeat download without regenerating.
@@ -57,7 +57,7 @@ The browser keeps the current workspace in IndexedDB and the server keeps submit
 
 Jobs have no automatic age-based expiry. Press **New job** to start a fresh workspace; previous Job IDs remain restorable.
 
-After a WebP finishes, the page shows an animated preview and caches the finished WebP in IndexedDB. The same result can therefore be downloaded again without rerunning alignment, RIFE or WebP encoding. If the browser copy is unavailable, the server-side copy can still be recovered by Job ID.
+After a WebP finishes, the page shows an animated preview and caches the finished WebP in IndexedDB. The same result can therefore be downloaded again without rerunning alignment, interpolation or WebP encoding. If the browser copy is unavailable, the server-side copy can still be recovered by Job ID.
 
 If the server restarts during an active render, the job is marked interrupted and `app_all.py` resumes it from the persisted sources/settings on startup.
 
@@ -122,18 +122,73 @@ RIFE_BOOTSTRAP_PYTHON=python3.11 python setup_rife.py
 
 After setup, restart the application. The page reports whether RIFE is ready.
 
+## Generative frame interpolation
+
+The **Interpolator** selector also supports two endpoint-constrained generative VFI families. These are substantially slower than RIFE or AMT and are intended for gaps where conventional optical-flow-style interpolation struggles with occlusion, large motion, articulation or newly revealed image content.
+
+### Multi-Input ResShift Diffusion VFI
+
+Install it into its own environment with:
+
+```bash
+python setup_resshift.py
+```
+
+The worker uses both endpoint frames and explicit interpolation time. It keeps one model resident per worker, crops transparent/unused canvas area before inference, reuses endpoint optical flow for multiple requested times, and progressively reduces its internal inference resolution after CUDA OOM. Diffusion-step progress is forwarded to the normal WebP Animator progress bar.
+
+The installer creates:
+
+```text
+.resshift-venv/
+third_party/Multi-Input-Resshift-Diffusion-VFI/
+third_party/Multi-Input-Resshift-Diffusion-VFI/_webp_model/
+```
+
+### Motion-Aware Generative Frame Interpolation (MoG)
+
+MoG has separate animation and real-world checkpoints. Install either one or both:
+
+```bash
+python setup_mog.py --variant ani
+python setup_mog.py --variant real
+python setup_mog.py --variant both
+```
+
+MoG is much heavier than ResShift. Its worker keeps the main diffusion model in FP16, avoids a temporary FP32 CUDA copy, stages the separate motion estimator onto the GPU only while calculating motion guidance, enables per-frame autoencoder decoding, crops empty canvas area and retries at smaller internal resolutions after CUDA OOM.
+
+The released MoG checkpoints are very large. A 4 GB GPU can still be below the model's practical minimum even at the smallest fallback resolution. This is reported as a clear engine error rather than silently switching to a different interpolation model.
+
+### Multi-GPU execution
+
+Generative interpolation gaps are independent jobs. When more than one CUDA GPU is visible, WebP Animator shards gaps across GPUs and runs one model worker per GPU in parallel. This avoids pretending separate VRAM pools are one device and scales naturally on equal-card systems.
+
+To restrict or select devices, use the normal CUDA mask:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 python app_all.py
+```
+
+To cap generative workers while still leaving more CUDA devices visible to other applications:
+
+```bash
+GENERATIVE_VFI_GPU_WORKERS=1 python app_all.py
+```
+
+Existing RIFE, AMT, EDEN and SPEED execution paths are not replaced by the generative engines.
+
 ### Processing order
 
 ```text
 uploaded raster frames / extracted WebP frames
   -> user-defined drag order
-  -> selected geometry correction (sequential / fit-previous / fix-to-frame-1)
+  -> selected geometry correction
   -> common expanded canvas
-  -> optional RIFE interpolation
-  -> lossless/optional lossy animated WebP encoding
+  -> smart/manual gap selection
+  -> selected interpolator and/or structural generator
+  -> optimised lossless/optional lossy animated WebP encoding
 ```
 
-The selected source frame duration is divided by the RIFE interpolation multiplier so the animation keeps approximately the same playback speed. For example, `200 ms` source frames with `4x` RIFE produce `50 ms` output frames, roughly `20 fps`.
+The source timing is redistributed according to the exact temporal positions returned by the selected interpolation engine, so adding generated frames does not lengthen the animation.
 
 ## Environment overrides
 
@@ -143,4 +198,29 @@ RIFE path overrides:
 RIFE_PYTHON
 RIFE_DIR
 RIFE_MODEL_DIR
+```
+
+ResShift path overrides:
+
+```text
+RESSHIFT_PYTHON
+RESSHIFT_DIR
+RESSHIFT_MODEL_DIR
+RESSHIFT_BOOTSTRAP_PYTHON
+RESSHIFT_TORCH_INDEX
+```
+
+MoG path overrides:
+
+```text
+MOG_PYTHON
+MOG_DIR
+MOG_ANI_CHECKPOINT
+MOG_REAL_CHECKPOINT
+MOG_FLOW_CHECKPOINT
+MOG_ANI_CONFIG
+MOG_REAL_CONFIG
+MOG_BOOTSTRAP_PYTHON
+MOG_TORCH_INDEX
+MOG_DDIM_STEPS
 ```

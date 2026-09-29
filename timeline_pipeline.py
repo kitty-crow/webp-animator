@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 
 import advanced_pipeline as base
+import engine_catalog
+import generative_vfi
 
 
 def _ensure_keys(records) -> None:
@@ -18,6 +20,17 @@ def _ensure_keys(records) -> None:
             record._live_key = f"timeline:{index}"
 
 
+def _selected_engine(settings: dict, operation: str) -> str:
+    if operation == "gap":
+        return str(settings.get("frame_generator", "none")).strip().lower()
+
+    explicit = str(settings.get("interpolator", "none")).strip().lower()
+    if explicit in generative_vfi.MARKERS:
+        return explicit
+    marked = generative_vfi._marker_engine(settings.get("target_gaps", ""))
+    return marked or explicit
+
+
 def _stage_for(record) -> str:
     if not getattr(record, "generated", False) and not getattr(record, "engine", None):
         return "Original"
@@ -25,14 +38,18 @@ def _stage_for(record) -> str:
     lower = engine.lower()
     if "propainter" in lower:
         prior = engine.replace("+propainter", "").replace("propainter+", "").strip("+")
-        return f"Repaired · {prior.upper() if prior else 'ProPainter'} + ProPainter"
-    if any(name in lower for name in ("rife", "amt")):
-        return f"Interpolated · {engine.upper()}"
-    if any(name in lower for name in ("eden", "speed")):
-        return f"Generated · {engine.upper()}"
+        prior_label = engine_catalog.engine_label(prior) if prior else "ProPainter"
+        return f"Repaired · {prior_label} + ProPainter"
+
+    role = engine_catalog.engine_role(lower)
+    label = engine_catalog.engine_label(lower)
+    if role == "interpolator":
+        return f"Interpolated · {label}"
+    if role == "generator":
+        return f"Generated · {label}"
     if not getattr(record, "generated", False):
-        return f"Repaired · {engine}"
-    return f"Generated · {engine}"
+        return f"Repaired · {label}"
+    return f"Generated · {label}"
 
 
 def _atomic_json(path: Path, value: dict) -> None:
@@ -130,10 +147,13 @@ def install(operation_pipeline_module) -> None:
         _ensure_keys(records)
         input_paths = base._save_records(records, Path(stage_dir) / "input")
         pair_specs = operation_pipeline_module.selected_pair_specs(records, plans, source_count)
-        if operation == "gap":
-            engine = str(settings.get("frame_generator", "none")).lower()
-        else:
-            engine = str(settings.get("interpolator", "none")).lower()
+        raw_engine = (
+            str(settings.get("frame_generator", "none")).strip().lower()
+            if operation == "gap"
+            else str(settings.get("interpolator", "none")).strip().lower()
+        )
+        engine = _selected_engine(settings, operation)
+        prior_ids = {id(record) for record in records}
         _base_manifest(
             records,
             input_paths,
@@ -157,6 +177,17 @@ def install(operation_pipeline_module) -> None:
             pass_total=pass_total,
             progress=progress,
         )
+
+        # Generative interpolators travel through app_all as the historical AMT
+        # compatibility token. Correct new records before publishing the canonical
+        # timeline so both the live cards and persisted metadata name the real model.
+        if operation == "interpolate" and engine != raw_engine:
+            for record in records:
+                if id(record) in prior_ids or not getattr(record, "generated", False):
+                    continue
+                if str(getattr(record, "engine", "")).strip().lower() == raw_engine:
+                    record.engine = engine
+
         generated_counter = 0
         for record in records:
             if getattr(record, "_live_key", None):

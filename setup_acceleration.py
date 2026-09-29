@@ -24,7 +24,14 @@ def main():
         "--index-url",
         "https://download.pytorch.org/whl/cu118",
     ])
+    run([sys.executable, "-m", "pip", "check"])
+    run([
+        sys.executable,
+        "-c",
+        "import torch; print('torch', torch.__version__); print('CUDA', torch.version.cuda); print('available', torch.cuda.is_available()); print('device', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'none'); assert str(torch.version.cuda or '').startswith('11.8'); assert torch.cuda.is_available(), 'main WebP Animator environment cannot initialise CUDA'",
+    ])
     print("\nCUDA acceleration setup complete.")
+    print("Runtime preflight: CUDA initialisation passed.")
     print("Restart app_all.py so GPU frame matching and smart analysis can be detected.")
 
 

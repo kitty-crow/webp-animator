@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from urllib.parse import quote
 
+import engine_catalog
+
 
 def _read_json(path: Path):
     try:
@@ -94,12 +96,13 @@ def _base_items(root: Path, job_id: str, base: dict):
 
 def _engine_outputs(root: Path, job_id: str, pass_dir: Path, base: dict):
     operation = str(base.get("operation", ""))
-    engine = str(base.get("engine", "") or "").upper()
+    engine_id = str(base.get("engine", "") or "").strip().lower()
+    engine_label = engine_catalog.engine_label(engine_id)
     if operation == "gap":
-        stage = f"Generated · {engine or 'generator'}"
+        stage = f"Generated · {engine_label if engine_id else 'generator'}"
         folders = list(pass_dir.glob("*-generator-v2/frames")) + list(pass_dir.glob("*-generator/frames"))
     else:
-        stage = f"Interpolated · {engine or 'interpolator'}"
+        stage = f"Interpolated · {engine_label if engine_id else 'interpolator'}"
         folders = list(pass_dir.glob("*-interpolator-v2/frames")) + list(pass_dir.glob("*-interpolator/frames"))
 
     outputs: dict[int, list[dict]] = {}
@@ -122,7 +125,7 @@ def _engine_outputs(root: Path, job_id: str, pass_dir: Path, base: dict):
                 stage=stage,
                 rel=rel,
                 generated=True,
-                engine=engine.lower(),
+                engine=engine_id,
             )
             if item:
                 outputs.setdefault(task_index, []).append((counter, item))

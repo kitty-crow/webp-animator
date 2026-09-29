@@ -50,6 +50,36 @@ class OperationPipelineTests(unittest.TestCase):
         self.assertEqual(operation_pipeline._gap_count({}), 1)
         self.assertEqual(operation_pipeline._gap_count({"frames_to_fill": 0}), 0)
 
+    def test_targeted_interpolation_uses_frames_to_fill_not_density(self):
+        plans = [temporal_v2.GapPlan("normal", 0, 0, True)]
+        count, adaptive = operation_pipeline._interpolation_request(
+            temporal_v2,
+            {"rife_multiplier": 1, "frames_to_fill": 5},
+            plans,
+        )
+        self.assertEqual(count, 5)
+        self.assertFalse(adaptive)
+
+    def test_targeted_zero_frames_means_adaptive_not_skip(self):
+        plans = [temporal_v2.GapPlan("normal", 0, 0, True)]
+        count, adaptive = operation_pipeline._interpolation_request(
+            temporal_v2,
+            {"rife_multiplier": 1, "frames_to_fill": 0},
+            plans,
+        )
+        self.assertEqual(count, 0)
+        self.assertTrue(adaptive)
+
+    def test_ordinary_interpolation_still_uses_multiplier_density(self):
+        plans = [temporal_v2.GapPlan("normal", 0, 0, False)]
+        count, adaptive = operation_pipeline._interpolation_request(
+            temporal_v2,
+            {"rife_multiplier": 4, "frames_to_fill": 1},
+            plans,
+        )
+        self.assertEqual(count, 3)
+        self.assertFalse(adaptive)
+
     def test_five_source_frames_have_four_ordinary_gaps(self):
         records = self.records(5)
         plans, _, _ = temporal_v2._plans_for_job(records, {}, 5)

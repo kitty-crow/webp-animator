@@ -1,0 +1,236 @@
+from __future__ import annotations
+
+import os
+import unittest
+from unittest import mock
+
+import engine_catalog
+import generative_pipeline_bridge
+import generative_vfi
+import model_offload
+import mog_selective_worker
+import setup_engine_common
+import tooncrafter_selective_worker_entry
+import tooncrafter_vfi
+import video_attention_compat
+
+
+tooncrafter_vfi.install_backend()
+
+
+class EngineStabilityTests(unittest.TestCase):
+    def test_every_generative_interpolator_is_catalogued(self):
+        expected = {"resshift", "mog_ani", "mog_real", "tooncrafter"}
+        self.assertTrue(expected.issubset(engine_catalog.engine_ids("interpolator")))
+        for engine in expected:
+            definition = engine_catalog.engine_definition(engine)
+            self.assertIsNotNone(definition)
+            self.assertTrue(definition["generative"])
+            self.assertTrue(definition["requires_cuda"])
+
+    def test_rife_is_also_runtime_cuda_guarded(self):
+        definition = engine_catalog.engine_definition("rife")
+        self.assertIsNotNone(definition)
+        self.assertTrue(definition["requires_cuda"])
+
+    def test_legacy_marker_resolves_to_real_engine_before_dispatch(self):
+        for engine, marker in generative_vfi.MARKERS.items():
+            settings = {
+                "interpolator": "amt",
+                "target_gaps": f"2,{marker},loop",
+            }
+            self.assertEqual(generative_pipeline_bridge._selected_engine(settings), engine)
+
+    def test_direct_generative_selection_is_also_understood(self):
+        for engine in ("resshift", "mog_ani", "mog_real", "tooncrafter"):
+            self.assertEqual(
+                generative_pipeline_bridge._selected_engine(
+                    {"interpolator": engine, "target_gaps": ""}
+                ),
+                engine,
+            )
+
+    def test_cuda11_driver_selects_cu118_for_old_research_stacks(self):
+        with mock.patch.object(setup_engine_common, "nvidia_driver_cuda_version", return_value=(11, 6)):
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("MOG_CUDA_VARIANT", None)
+                variant, driver = setup_engine_common.choose_torch_cuda_variant(
+                    "MOG_CUDA_VARIANT",
+                    cuda12_variant="cu121",
+                )
+        self.assertEqual(driver, (11, 6))
+        self.assertEqual(variant, "cu118")
+
+    def test_cuda12_driver_selects_cuda12_family(self):
+        with mock.patch.object(setup_engine_common, "nvidia_driver_cuda_version", return_value=(12, 4)):
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("TOONCRAFTER_CUDA_VARIANT", None)
+                variant, driver = setup_engine_common.choose_torch_cuda_variant(
+                    "TOONCRAFTER_CUDA_VARIANT",
+                    cuda12_variant="cu121",
+                )
+        self.assertEqual(driver, (12, 4))
+        self.assertEqual(variant, "cu121")
+
+    def test_explicit_cuda_override_wins(self):
+        with mock.patch.dict(os.environ, {"MOG_CUDA_VARIANT": "cu118"}, clear=False):
+            with mock.patch.object(setup_engine_common, "nvidia_driver_cuda_version", return_value=(12, 4)):
+                variant, _ = setup_engine_common.choose_torch_cuda_variant(
+                    "MOG_CUDA_VARIANT",
+                    cuda12_variant="cu121",
+                )
+        self.assertEqual(variant, "cu118")
+
+    def test_catalog_hides_cuda_only_engine_when_its_runtime_is_broken(self):
+        state = {
+            "resshift": {"ready": True, "python": "fake-python"},
+            "amt": {"ready": True, "python": "fake-python"},
+        }
+        with mock.patch.object(
+            engine_catalog,
+            "_cuda_runtime_probe",
+            return_value={"ready": False, "error": "CUDA unavailable"},
+        ):
+            catalog = engine_catalog.catalog_from_status(state)
+        by_id = {entry["id"]: entry for entry in catalog}
+        self.assertFalse(by_id["resshift"]["ready"])
+        self.assertEqual(by_id["resshift"]["error"], "CUDA unavailable")
+        # AMT has a CPU path, so a missing CUDA runtime must not make the engine
+        # disappear from the catalogue entirely.
+        self.assertTrue(by_id["amt"]["ready"])
+
+    def test_decorated_top_level_readiness_matches_catalogue(self):
+        state = {
+            "rife": {"ready": True, "python": "fake-python"},
+            "amt": {"ready": True, "python": "fake-python"},
+        }
+        with mock.patch.object(
+            engine_catalog,
+            "_cuda_runtime_probe",
+            return_value={"ready": False, "error": "driver mismatch"},
+        ):
+            decorated = engine_catalog.decorate_status(state)
+        by_id = {entry["id"]: entry for entry in decorated["engines"]}
+        self.assertFalse(by_id["rife"]["ready"])
+        self.assertFalse(decorated["rife"]["ready"])
+        self.assertEqual(decorated["rife"]["error"], "driver mismatch")
+        self.assertTrue(decorated["amt"]["ready"])
+
+    def test_meta_offload_guard_prevents_legacy_module_to_from_copying_meta(self):
+        try:
+            import torch
+        except Exception as exc:
+            self.skipTest(f"torch unavailable in test environment: {exc}")
+
+        layer = torch.nn.Linear(4, 4, device="meta")
+        self.assertTrue(model_offload._module_has_meta_state(layer))
+        guarded = model_offload._guard_meta_module_moves(layer)
+        self.assertGreaterEqual(guarded, 1)
+        # A normal Module.to('cuda') on a meta parameter raises because meta has no
+        # backing storage. Once a module is Accelerate-managed, that relocation is
+        # redundant: the forward hook streams the real weight to its execution device.
+        self.assertIs(layer.to(torch.device("cuda")), layer)
+        self.assertEqual(next(layer.parameters()).device.type, "meta")
+
+    def test_mog_vfi_train_override_is_removed_before_staged_flow(self):
+        try:
+            import torch
+        except Exception as exc:
+            self.skipTest(f"torch unavailable in test environment: {exc}")
+
+        class Parent:
+            pass
+
+        class VFI:
+            pass
+
+        parent = Parent()
+        parent.vfi = VFI()
+        parent.vfi.net = torch.nn.Sequential(torch.nn.Linear(4, 4))
+        parent.vfi.net.eval()
+        # Upstream emavfi.vfi_utils installs exactly this override. Module.eval()
+        # subsequently returns False because it delegates to self.train(False).
+        parent.vfi.net.train = lambda value: value
+        self.assertIs(parent.vfi.net.eval(), False)
+
+        mog_selective_worker._repair_vfi_train_override(torch, parent)
+        self.assertIsInstance(parent.vfi.net, torch.nn.Module)
+        self.assertIs(parent.vfi.net.eval(), parent.vfi.net)
+        self.assertFalse(parent.vfi.net.training)
+
+    def test_tooncrafter_repairs_non_module_eval_return(self):
+        try:
+            import torch
+        except Exception as exc:
+            self.skipTest(f"torch unavailable in test environment: {exc}")
+
+        model = torch.nn.Sequential(torch.nn.Linear(4, 4))
+        model.train = lambda value: value
+        self.assertIs(model.eval(), False)
+        tooncrafter_selective_worker_entry._repair_bad_eval_overrides(torch, model)
+        self.assertIs(model.eval(), model)
+        self.assertFalse(model.training)
+
+    def test_diffusion_low_vram_targets_are_unet_aligned(self):
+        gib = 1024**3
+        for worker in (mog_selective_worker, tooncrafter_selective_worker_entry):
+            for vram in (4 * gib, 6 * gib, 11 * gib, 16 * gib):
+                ladder = worker._target_ladder(vram)
+                self.assertTrue(ladder)
+                for width, height in ladder:
+                    self.assertEqual(width % worker.SPATIAL_ALIGNMENT, 0)
+                    self.assertEqual(height % worker.SPATIAL_ALIGNMENT, 0)
+            # The exact old preflight size that caused MoG's 8-vs-7 skip mismatch
+            # must be normalised before it can reach either denoiser.
+            self.assertEqual(worker._normalise_target((224, 128)), (192, 128))
+
+    def test_video_vae_attention_uses_torch_when_xformers_is_unusable(self):
+        config = {
+            "params": {
+                "first_stage_config": {
+                    "params": {"ddconfig": {"attn_type": "vanilla-xformers"}}
+                }
+            }
+        }
+        selected = video_attention_compat.set_first_stage_attention(
+            config, use_xformers=False
+        )
+        self.assertEqual(selected, "vanilla")
+        self.assertEqual(
+            config["params"]["first_stage_config"]["params"]["ddconfig"]["attn_type"],
+            "vanilla",
+        )
+
+    def test_video_vae_attention_keeps_xformers_only_when_usable(self):
+        config = {
+            "params": {
+                "first_stage_config": {"params": {"ddconfig": {}}}
+            }
+        }
+        selected = video_attention_compat.set_first_stage_attention(
+            config, use_xformers=True
+        )
+        self.assertEqual(selected, "vanilla-xformers")
+
+    def test_video_vae_fallback_rejects_hidden_xformers_block(self):
+        try:
+            import torch
+        except Exception as exc:
+            self.skipTest(f"torch unavailable in test environment: {exc}")
+
+        class MemoryEfficientAttnBlock(torch.nn.Module):
+            pass
+
+        class Parent:
+            pass
+
+        parent = Parent()
+        parent.first_stage_model = torch.nn.Sequential(MemoryEfficientAttnBlock())
+        with self.assertRaisesRegex(RuntimeError, "MemoryEfficientAttnBlock"):
+            video_attention_compat.validate_first_stage_attention(
+                parent, selected="vanilla", label="test"
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

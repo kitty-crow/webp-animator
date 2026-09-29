@@ -3,13 +3,33 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from setup_engine_common import choose_python, download, ensure_repo, ensure_venv, run
+from setup_engine_common import choose_python, download, ensure_repo, ensure_venv, run, validate_cuda_runtime
 
 ROOT = Path(__file__).resolve().parent
 SOURCE = ROOT / "third_party" / "AMT"
 VENV = ROOT / ".amt-venv"
+CONFIG = SOURCE / "cfgs" / "AMT-S.yaml"
 CHECKPOINT = SOURCE / "pretrained" / "amt-s.pth"
 CHECKPOINT_URL = "https://huggingface.co/lalala125/AMT/resolve/main/amt-s.pth"
+
+
+def validate_runtime(python: Path) -> None:
+    code = f"""
+import gc
+import sys
+from pathlib import Path
+root = Path({str(ROOT)!r})
+sys.path.insert(0, str(root))
+import amt_worker
+import torch
+torch_module, device, model = amt_worker.load_amt(Path({str(SOURCE)!r}), Path({str(CONFIG)!r}), Path({str(CHECKPOINT)!r}))
+assert device.type == 'cuda', 'AMT runtime did not select CUDA'
+print('AMT model load: ok')
+del model
+gc.collect()
+torch.cuda.empty_cache()
+"""
+    run([python, "-c", code])
 
 
 def main():
@@ -38,11 +58,15 @@ def main():
         "omegaconf>=2.3",
         "tqdm>=4.64",
     ])
+    run([python, "-m", "pip", "check"])
+    validate_cuda_runtime(python, "11.8")
     download(CHECKPOINT_URL, CHECKPOINT)
+    validate_runtime(python)
     print("\nAMT setup complete.")
     print(f"Python:     {python}")
     print(f"Source:     {SOURCE}")
     print(f"Checkpoint: {CHECKPOINT}")
+    print("Runtime preflight: CUDA and actual AMT model load passed.")
 
 
 if __name__ == "__main__":

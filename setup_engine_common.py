@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -30,11 +31,15 @@ def choose_python(env_name: str):
 
 
 def venv_python(venv: Path):
-    candidates = [venv / "Scripts" / "python.exe", venv / "bin" / "python"]
+    candidates = [
+        venv / "Scripts" / "python.exe",
+        venv / "Scripts" / "python",
+        venv / "bin" / "python",
+    ]
     for candidate in candidates:
         if candidate.is_file():
             return candidate
-    return candidates[0] if os.name == "nt" else candidates[1]
+    return candidates[0] if os.name == "nt" else candidates[-1]
 
 
 def ensure_venv(venv: Path, bootstrap_python: str):
@@ -64,3 +69,136 @@ def download(url: str, destination: Path):
     with urllib.request.urlopen(url) as response, temporary.open("wb") as output:
         shutil.copyfileobj(response, output, length=1024 * 1024)
     os.replace(temporary, destination)
+
+
+def nvidia_driver_cuda_version() -> tuple[int, int] | None:
+    """Return the CUDA compatibility level reported by the installed NVIDIA driver."""
+    executable = shutil.which("nvidia-smi")
+    if not executable:
+        return None
+    try:
+        result = subprocess.run(
+            [executable],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+    except Exception:
+        return None
+    match = re.search(r"CUDA Version:\s*(\d+)\.(\d+)", f"{result.stdout}\n{result.stderr}")
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def choose_torch_cuda_variant(
+    env_name: str,
+    *,
+    cuda12_variant: str = "cu121",
+    default_without_driver: str = "cu118",
+) -> tuple[str, tuple[int, int] | None]:
+    """Choose a PyTorch CUDA wheel family that the installed driver can initialise.
+
+    Research-model installers must not blindly install CUDA-12 wheels: older but
+    otherwise supported Pascal/Turing machines can expose only CUDA 11.x through
+    their current driver. An explicit environment override remains available for
+    machines where nvidia-smi is unavailable or intentionally masked.
+    """
+    allowed = {"cu118", cuda12_variant}
+    requested = os.environ.get(env_name, "").strip().lower()
+    if requested:
+        if requested not in allowed:
+            raise RuntimeError(
+                f"Unknown {env_name}={requested!r}; choose one of: {', '.join(sorted(allowed))}."
+            )
+        return requested, nvidia_driver_cuda_version()
+
+    driver = nvidia_driver_cuda_version()
+    if driver is None:
+        variant = default_without_driver
+    else:
+        variant = "cu118" if driver[0] < 12 else cuda12_variant
+    return variant, driver
+
+
+def installed_torch_cuda(python: Path) -> str | None:
+    result = subprocess.run(
+        [str(python), "-c", "import torch; print(torch.version.cuda or '')"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    value = result.stdout.strip()
+    return value or None
+
+
+def validate_cuda_runtime(python: Path, expected_prefix: str, *, require_cupy: bool = False) -> None:
+    imports = "import torch"
+    cupy_probe = ""
+    if require_cupy:
+        imports += ", cupy"
+        cupy_probe = (
+            "; print('cupy devices', cupy.cuda.runtime.getDeviceCount())"
+            "; assert cupy.cuda.runtime.getDeviceCount() > 0, 'CuPy cannot see a CUDA device'"
+        )
+    code = (
+        f"{imports}; "
+        "print('torch', torch.__version__); "
+        "print('torch CUDA', torch.version.cuda); "
+        "print('cuda available', torch.cuda.is_available()); "
+        "print('device', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'none'); "
+        f"assert str(torch.version.cuda or '').startswith({expected_prefix!r}), 'wrong PyTorch CUDA runtime'; "
+        "assert torch.cuda.is_available(), 'PyTorch cannot initialise CUDA with the installed NVIDIA driver'"
+        + cupy_probe
+    )
+    run([python, "-c", code])
+
+
+def install_optional_xformers(python: Path, version: str = "0.0.22.post7") -> bool:
+    """Install xFormers only when its actual attention kernel works on this GPU.
+
+    Several upstream video-diffusion repos select xFormers from static defaults rather
+    than from a successful runtime kernel probe. On older Pascal GPUs a wheel can
+    import successfully yet have no memory-efficient-attention kernel for the device.
+    Exercise the exact operation here. If unsupported, uninstall xFormers; engine
+    integrations that support PyTorch attention must explicitly select that backend
+    at model-construction time instead of assuming upstream will do it automatically.
+    """
+    completed = run(
+        [python, "-m", "pip", "install", f"xformers=={version}"],
+        check=False,
+    )
+    if completed.returncode != 0:
+        print("WARNING: xFormers could not be installed; engine integration must use PyTorch attention.")
+        return False
+
+    probe = subprocess.run(
+        [
+            str(python),
+            "-c",
+            (
+                "import torch, xformers.ops; "
+                "assert torch.cuda.is_available(); "
+                "q=torch.randn((2,16,32),device='cuda',dtype=torch.float16); "
+                "y=xformers.ops.memory_efficient_attention(q,q,q); "
+                "torch.cuda.synchronize(); "
+                "print('xFormers attention kernel: ok', tuple(y.shape))"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if probe.returncode == 0:
+        if probe.stdout.strip():
+            print(probe.stdout.strip())
+        return True
+
+    details = (probe.stderr or probe.stdout or "no compatible attention kernel").strip()
+    print("WARNING: xFormers imports but cannot execute memory-efficient attention on this GPU.")
+    if details:
+        print(details[-1200:])
+    run([python, "-m", "pip", "uninstall", "-y", "xformers"], check=False)
+    print("xFormers disabled; the engine integration must select its PyTorch attention path.")
+    return False
