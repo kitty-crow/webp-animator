@@ -1,9 +1,9 @@
 import { AdaptiveAlignmentEngine, renderUnionFrames } from './alignment.js';
 import { decodeInputFiles } from './frame-codec.js';
 import { gpuLabel } from './hardware.js';
-import { InferenceWorkerClient } from './inference-worker-client.js';
+import { InferenceWorkerClient, type RenderWorkerProgress } from './inference-worker-client.js';
 import { runPreflight } from './preflight.js';
-import type { PreflightResult, ProgressUpdate, RegistrationSettings } from './types.js';
+import type { ComputeBackend, PreflightResult, ProgressUpdate, RegistrationSettings, ShiftResult } from './types.js';
 import { encodeAnimatedWebp } from './webp-muxer.js';
 
 function element<T extends HTMLElement>(id: string, constructor: { new (): T }): T {
@@ -65,6 +65,18 @@ function interpolationMultiplier(): 2 | 4 | 8 {
   return value === 4 || value === 8 ? value : 2;
 }
 
+function outputDuration(): number {
+  return Math.max(1, Math.round(Number(numberInput('duration').value) || 100));
+}
+
+function outputLoop(): number {
+  return Math.max(0, Math.round(Number(numberInput('loop').value) || 0));
+}
+
+function outputQuality(): number {
+  return Math.max(0.01, Math.min(1, (Number(numberInput('quality').value) || 95) / 100));
+}
+
 function setStatus(message: string, kind: 'neutral' | 'error' | 'success' = 'neutral'): void {
   status.textContent = message;
   status.dataset['kind'] = kind;
@@ -81,6 +93,23 @@ function setProgress(update: ProgressUpdate): void {
         ? 'Interpolating with RIFE worker'
         : 'Encoding WebP';
   progressText.textContent = `${label} · ${update.current}/${update.total}`;
+}
+
+function setWorkerProgress(update: RenderWorkerProgress): void {
+  if (update.stage === 'preflight') {
+    const total = Math.max(1, update.total);
+    progress.value = Math.min(1, update.current / total);
+    progressText.textContent = `Worker hardware pre-flight · ${update.current}/${update.total}`;
+  } else if (update.stage === 'decode') {
+    setProgress({ stage: 'decode', current: update.current, total: update.total, fileName: update.detail });
+  } else {
+    setProgress({ stage: update.stage, current: update.current, total: update.total });
+  }
+
+  const backend = update.computeBackend === null ? '' : ` · ${update.computeBackend}`;
+  const provider = update.provider === null ? '' : ` · model ${update.provider}`;
+  const hidden = document.hidden ? ' · background tab' : '';
+  setStatus(`Persistent render worker active${backend}${provider}${hidden}.`);
 }
 
 function benchmarkLabel(result: PreflightResult): string {
@@ -105,6 +134,9 @@ function populateFooter(result: PreflightResult): void {
       : 'single-threaded browser';
   const webgl = profile.webgl2.available ? `WebGL2 ${profile.webgl2.renderer ?? 'adapter'}` : 'WebGL2 unavailable';
   const simd = profile.wasmSimd ? 'WASM SIMD' : profile.wasm ? 'scalar WASM' : 'WASM unavailable';
+  const workerPipeline = profile.workerSupport && profile.offscreenCanvas
+    ? 'full persistent render worker available'
+    : 'compatibility coordinator required';
 
   footerResources.replaceChildren();
   const selected = document.createElement('strong');
@@ -114,7 +146,7 @@ function populateFooter(result: PreflightResult): void {
   const benchmarks = document.createElement('span');
   benchmarks.textContent = `Pre-flight: ${benchmarkLabel(result)}`;
   const models = document.createElement('span');
-  models.textContent = 'Inference: persistent dedicated worker · RIFE 4.25 ONNX ready · ResShift/MoG/ToonCrafter component export in progress · ProPainter licence-gated';
+  models.textContent = `Execution: ${workerPipeline} · RIFE 4.25 ONNX ready · ResShift/MoG/ToonCrafter component export in progress · ProPainter licence-gated`;
   footerResources.append(selected, details, benchmarks, models);
 }
 
@@ -138,6 +170,14 @@ interface InterpolationSequence {
   readonly frames: readonly ImageData[];
   readonly durations: readonly (number | null)[];
   readonly provider: 'webgpu' | 'wasm' | null;
+}
+
+interface FinalRenderResult {
+  readonly blob: Blob;
+  readonly provider: 'webgpu' | 'wasm' | null;
+  readonly computeBackend: ComputeBackend;
+  readonly pairwise: readonly ShiftResult[];
+  readonly mode: 'persistent-worker' | 'compatibility';
 }
 
 function passthroughSequence(
@@ -177,6 +217,87 @@ async function interpolateRife(
   }
 }
 
+async function persistentRender(files: readonly File[]): Promise<FinalRenderResult> {
+  const started = inferenceWorker.renderFiles(
+    files,
+    settings(),
+    interpolationEngine(),
+    interpolationMultiplier(),
+    outputDuration(),
+    outputLoop(),
+    outputQuality(),
+    setWorkerProgress,
+  );
+  activeInferenceJobId = started.jobId;
+  cancelButton.disabled = false;
+  try {
+    const result = await started.promise;
+    return {
+      blob: result.blob,
+      provider: result.provider,
+      computeBackend: result.computeBackend,
+      pairwise: result.pairwise,
+      mode: 'persistent-worker',
+    };
+  } finally {
+    activeInferenceJobId = null;
+    cancelButton.disabled = true;
+  }
+}
+
+async function compatibilityRender(files: readonly File[], activePreflight: PreflightResult): Promise<FinalRenderResult> {
+  const engine = await AdaptiveAlignmentEngine.create(activePreflight.profile, activePreflight.selectedBackend);
+  try {
+    const decoded = await decodeInputFiles(files, setProgress);
+    const registration = await engine.registerSequence(decoded.frames, settings(), (current, total) => {
+      setProgress({ stage: 'align', current, total });
+    });
+    const rendered = renderUnionFrames(decoded.frames, registration.positions);
+    const duration = outputDuration();
+    const interpolated = interpolationEngine() === 'rife'
+      ? await interpolateRife(rendered, decoded.sourceDurations, duration, interpolationMultiplier())
+      : passthroughSequence(rendered, decoded.sourceDurations);
+    const blob = await encodeAnimatedWebp(interpolated.frames, {
+      duration,
+      durations: interpolated.durations,
+      loop: outputLoop(),
+      quality: outputQuality(),
+    }, (current, total) => setProgress({ stage: 'encode', current, total }));
+    return {
+      blob,
+      provider: interpolated.provider,
+      computeBackend: activePreflight.selectedBackend,
+      pairwise: registration.pairwise,
+      mode: 'compatibility',
+    };
+  } finally {
+    engine.close();
+  }
+}
+
+function publishResult(result: FinalRenderResult): void {
+  if (resultUrl) URL.revokeObjectURL(resultUrl);
+  resultUrl = URL.createObjectURL(result.blob);
+  preview.src = resultUrl;
+  preview.hidden = false;
+  download.href = resultUrl;
+  download.download = 'animation.webp';
+  download.hidden = false;
+  const alignmentReport = result.pairwise
+    .map((entry, index) => `frame ${index + 2}: dx=${entry.dx}, dy=${entry.dy}, score=${entry.score.toFixed(6)}`)
+    .join('\n');
+  const modelReport = result.provider === null
+    ? 'Interpolation: disabled'
+    : `Interpolation: RIFE 4.25 ONNX via ${result.provider}`;
+  const modeReport = result.mode === 'persistent-worker'
+    ? `Pipeline: persistent worker via ${result.computeBackend}`
+    : `Pipeline: compatibility coordinator via ${result.computeBackend}`;
+  results.textContent = `${modeReport}\n${modelReport}\n${alignmentReport}`;
+  progress.value = 1;
+  progressText.textContent = 'Complete';
+  setStatus(`Finished entirely on this device with ${result.computeBackend}.`, 'success');
+}
+
 async function initialise(): Promise<void> {
   preflightStatus.textContent = 'Running automatic hardware pre-flight…';
   await ensureIsolationServiceWorker();
@@ -199,16 +320,16 @@ cancelButton.addEventListener('click', () => {
   const jobId = activeInferenceJobId;
   if (jobId === null) return;
   cancelButton.disabled = true;
-  setStatus('Cancelling inference after the current model invocation returns…');
+  setStatus('Cancelling after the current compute invocation returns…');
   inferenceWorker.cancel(jobId);
 });
 
 document.addEventListener('visibilitychange', () => {
   if (activeInferenceJobId === null) return;
   if (document.hidden) {
-    setStatus('Tab hidden. The dedicated inference worker is continuing the active job.');
+    setStatus('Tab hidden. The persistent render worker is continuing the active job.');
   } else {
-    setStatus('Tab visible again. Inference worker remains active.');
+    setStatus('Tab visible again. Persistent render worker remains active.');
   }
 });
 
@@ -222,52 +343,20 @@ runButton.addEventListener('click', () => {
     cancelButton.disabled = true;
     progress.value = 0;
     setStatus('Processing entirely on this device…');
-    const engine = await AdaptiveAlignmentEngine.create(activePreflight.profile, activePreflight.selectedBackend);
     try {
-      const decoded = await decodeInputFiles(files, setProgress);
-      const registration = await engine.registerSequence(decoded.frames, settings(), (current, total) => {
-        setProgress({ stage: 'align', current, total });
-      });
-      const rendered = renderUnionFrames(decoded.frames, registration.positions);
-      const duration = Math.max(1, Math.round(Number(numberInput('duration').value) || 100));
-      const interpolated = interpolationEngine() === 'rife'
-        ? await interpolateRife(rendered, decoded.sourceDurations, duration, interpolationMultiplier())
-        : passthroughSequence(rendered, decoded.sourceDurations);
-      const loop = Math.max(0, Math.round(Number(numberInput('loop').value) || 0));
-      const quality = Math.max(0.01, Math.min(1, (Number(numberInput('quality').value) || 95) / 100));
-      const blob = await encodeAnimatedWebp(interpolated.frames, {
-        duration,
-        durations: interpolated.durations,
-        loop,
-        quality,
-      }, (current, total) => setProgress({ stage: 'encode', current, total }));
-
-      if (resultUrl) URL.revokeObjectURL(resultUrl);
-      resultUrl = URL.createObjectURL(blob);
-      preview.src = resultUrl;
-      preview.hidden = false;
-      download.href = resultUrl;
-      download.download = 'animation.webp';
-      download.hidden = false;
-      const alignmentReport = registration.pairwise
-        .map((entry, index) => `frame ${index + 2}: dx=${entry.dx}, dy=${entry.dy}, score=${entry.score.toFixed(6)}`)
-        .join('\n');
-      const modelReport = interpolated.provider === null
-        ? 'Interpolation: disabled'
-        : `Interpolation: RIFE 4.25 ONNX persistent worker via ${interpolated.provider}`;
-      results.textContent = `${modelReport}\n${alignmentReport}`;
-      progress.value = 1;
-      progressText.textContent = 'Complete';
-      setStatus(`Finished locally with ${activePreflight.selectedBackend}.`, 'success');
+      const usePersistentWorker = activePreflight.profile.workerSupport && activePreflight.profile.offscreenCanvas;
+      const result = usePersistentWorker
+        ? await persistentRender(files)
+        : await compatibilityRender(files, activePreflight);
+      publishResult(result);
     } catch (error: unknown) {
       if (error instanceof DOMException && error.name === 'AbortError') {
         progressText.textContent = 'Cancelled';
-        setStatus('Inference cancelled.', 'neutral');
+        setStatus('Processing cancelled.', 'neutral');
       } else {
         setStatus(error instanceof Error ? error.message : String(error), 'error');
       }
     } finally {
-      engine.close();
       activeInferenceJobId = null;
       cancelButton.disabled = true;
       runButton.disabled = false;
