@@ -1,11 +1,13 @@
+import type { AmtAssetBundle, AmtScaleAsset } from './amt.js';
 import type { BrowserExternalDataAsset, BrowserModelAsset } from './catalog.js';
 import type { MogAssetBundle } from './mog.js';
 import type { ResShiftAssetBundle } from './resshift.js';
 import type { ToonCrafterAssetBundle } from './tooncrafter.js';
 
-export type ManifestBackedFamily = 'resshift' | 'mog' | 'tooncrafter';
+export type ManifestBackedFamily = 'amt' | 'resshift' | 'mog' | 'tooncrafter';
 
 export type LoadedModelManifest =
+  | { readonly family: 'amt'; readonly bundle: AmtAssetBundle }
   | { readonly family: 'resshift'; readonly bundle: ResShiftAssetBundle }
   | { readonly family: 'mog'; readonly bundle: MogAssetBundle }
   | { readonly family: 'tooncrafter'; readonly bundle: ToonCrafterAssetBundle };
@@ -129,6 +131,29 @@ function parseToonSchedule(value: unknown): NonNullable<ToonCrafterAssetBundle['
   };
 }
 
+function parseAmtScales(
+  value: unknown,
+  components: Readonly<Record<string, unknown>>,
+  make: (path: string) => BrowserModelAsset,
+): readonly AmtScaleAsset[] {
+  if (!Array.isArray(value) || value.length === 0) throw new Error('AMT manifest scales must be a non-empty array.');
+  const scales = value.map((entry: unknown, index: number): AmtScaleAsset => {
+    const record = recordOf(entry, `scales[${index}]`);
+    const component = stringField(record, 'component', `scales[${index}]`);
+    const scaleFactor = finiteNumber(record, 'scaleFactor', `scales[${index}]`);
+    const divisor = positiveInteger(record, 'divisor', `scales[${index}]`);
+    if (scaleFactor <= 0 || scaleFactor > 1) throw new Error(`scales[${index}].scaleFactor must be in (0, 1].`);
+    return {
+      scaleFactor,
+      divisor,
+      asset: make(componentPath(components, component)),
+    };
+  });
+  const ordered = [...scales].sort((left, right) => right.scaleFactor - left.scaleFactor);
+  if (ordered[0]?.scaleFactor !== 1) throw new Error('AMT manifest must include a full-scale graph.');
+  return ordered;
+}
+
 export async function loadModelManifest(
   manifestUrlText: string,
   expectedFamily: ManifestBackedFamily,
@@ -145,6 +170,13 @@ export async function loadModelManifest(
   const components = recordOf(root['components'], 'components');
   const assets = parseAssets(root['assets']);
   const make = (path: string): BrowserModelAsset => assetFor(manifestUrl, assets, path, expectedFamily, source, licence);
+
+  if (expectedFamily === 'amt') {
+    return {
+      family: 'amt',
+      bundle: { scales: parseAmtScales(root['scales'], components, make) },
+    };
+  }
 
   if (expectedFamily === 'resshift') {
     return {
