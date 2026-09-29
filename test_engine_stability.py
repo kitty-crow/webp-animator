@@ -12,6 +12,7 @@ import mog_selective_worker
 import setup_engine_common
 import tooncrafter_selective_worker_entry
 import tooncrafter_vfi
+import video_attention_compat
 
 
 tooncrafter_vfi.install_backend()
@@ -182,6 +183,53 @@ class EngineStabilityTests(unittest.TestCase):
             # The exact old preflight size that caused MoG's 8-vs-7 skip mismatch
             # must be normalised before it can reach either denoiser.
             self.assertEqual(worker._normalise_target((224, 128)), (192, 128))
+
+    def test_video_vae_attention_uses_torch_when_xformers_is_unusable(self):
+        config = {
+            "params": {
+                "first_stage_config": {
+                    "params": {"ddconfig": {"attn_type": "vanilla-xformers"}}
+                }
+            }
+        }
+        selected = video_attention_compat.set_first_stage_attention(
+            config, use_xformers=False
+        )
+        self.assertEqual(selected, "vanilla")
+        self.assertEqual(
+            config["params"]["first_stage_config"]["params"]["ddconfig"]["attn_type"],
+            "vanilla",
+        )
+
+    def test_video_vae_attention_keeps_xformers_only_when_usable(self):
+        config = {
+            "params": {
+                "first_stage_config": {"params": {"ddconfig": {}}}
+            }
+        }
+        selected = video_attention_compat.set_first_stage_attention(
+            config, use_xformers=True
+        )
+        self.assertEqual(selected, "vanilla-xformers")
+
+    def test_video_vae_fallback_rejects_hidden_xformers_block(self):
+        try:
+            import torch
+        except Exception as exc:
+            self.skipTest(f"torch unavailable in test environment: {exc}")
+
+        class MemoryEfficientAttnBlock(torch.nn.Module):
+            pass
+
+        class Parent:
+            pass
+
+        parent = Parent()
+        parent.first_stage_model = torch.nn.Sequential(MemoryEfficientAttnBlock())
+        with self.assertRaisesRegex(RuntimeError, "MemoryEfficientAttnBlock"):
+            video_attention_compat.validate_first_stage_attention(
+                parent, selected="vanilla", label="test"
+            )
 
 
 if __name__ == "__main__":
