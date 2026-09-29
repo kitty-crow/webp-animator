@@ -93,7 +93,7 @@ export interface DecodeProgress {
 }
 
 export interface OperationProgress {
-  readonly stage: 'align' | 'encode';
+  readonly stage: 'align' | 'interpolate' | 'encode';
   readonly current: number;
   readonly total: number;
 }
