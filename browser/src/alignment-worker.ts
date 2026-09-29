@@ -22,32 +22,41 @@ function isArrayBufferLike(value: unknown): value is ArrayBufferLike {
 function parseRequest(value: unknown): WorkerScoreRequest {
   if (typeof value !== 'object' || value === null) throw new Error('Worker request must be an object.');
   const record = value as Record<string, unknown>;
-  if (typeof record.id !== 'number') throw new Error('Worker request has no numeric id.');
-  if (!isArrayBufferLike(record.aBuffer) || !isArrayBufferLike(record.bBuffer)) throw new Error('Worker request is missing frame buffers.');
-  if (!(record.candidates instanceof Int32Array)) throw new Error('Worker request candidates must be Int32Array.');
+  const id = record['id'];
+  const aBuffer = record['aBuffer'];
+  const bBuffer = record['bBuffer'];
+  const candidates = record['candidates'];
+  const aw = record['aw'];
+  const ah = record['ah'];
+  const bw = record['bw'];
+  const bh = record['bh'];
+  const sigma = record['sigma'];
+  const alphaThreshold = record['alphaThreshold'];
+  const normaliser = record['normaliser'];
+  const preferWasm = record['preferWasm'];
+  const preferSimd = record['preferSimd'];
 
-  const numericKeys = ['aw', 'ah', 'bw', 'bh', 'sigma', 'alphaThreshold', 'normaliser'] as const;
-  for (const key of numericKeys) {
-    if (typeof record[key] !== 'number') throw new Error(`Worker request ${key} must be numeric.`);
-  }
-  if (typeof record.preferWasm !== 'boolean' || typeof record.preferSimd !== 'boolean') {
-    throw new Error('Worker request backend preferences must be boolean.');
-  }
+  if (typeof id !== 'number') throw new Error('Worker request has no numeric id.');
+  if (!isArrayBufferLike(aBuffer) || !isArrayBufferLike(bBuffer)) throw new Error('Worker request is missing frame buffers.');
+  if (!(candidates instanceof Int32Array)) throw new Error('Worker request candidates must be Int32Array.');
+  if (typeof aw !== 'number' || typeof ah !== 'number' || typeof bw !== 'number' || typeof bh !== 'number') throw new Error('Worker frame dimensions must be numeric.');
+  if (typeof sigma !== 'number' || typeof alphaThreshold !== 'number' || typeof normaliser !== 'number') throw new Error('Worker score parameters must be numeric.');
+  if (typeof preferWasm !== 'boolean' || typeof preferSimd !== 'boolean') throw new Error('Worker backend preferences must be boolean.');
 
   return {
-    id: record.id,
-    aBuffer: record.aBuffer,
-    bBuffer: record.bBuffer,
-    aw: record.aw,
-    ah: record.ah,
-    bw: record.bw,
-    bh: record.bh,
-    candidates: record.candidates,
-    sigma: record.sigma,
-    alphaThreshold: record.alphaThreshold,
-    normaliser: record.normaliser,
-    preferWasm: record.preferWasm,
-    preferSimd: record.preferSimd,
+    id,
+    aBuffer,
+    bBuffer,
+    aw,
+    ah,
+    bw,
+    bh,
+    candidates,
+    sigma,
+    alphaThreshold,
+    normaliser,
+    preferWasm,
+    preferSimd,
   };
 }
 
@@ -89,9 +98,7 @@ function jsScoreTranslation(
       const br = second[bi];
       const bg = second[bi + 1];
       const bb = second[bi + 2];
-      if (ar === undefined || ag === undefined || ab === undefined || br === undefined || bg === undefined || bb === undefined) {
-        throw new Error('Frame buffer bounds mismatch.');
-      }
+      if (ar === undefined || ag === undefined || ab === undefined || br === undefined || bg === undefined || bb === undefined) throw new Error('Frame buffer bounds mismatch.');
       const distance = (
         Math.abs(ar - br) +
         Math.abs(ag - bg) +
@@ -118,17 +125,10 @@ async function loadWasm(preferSimd: boolean): Promise<WasmAlignmentModule> {
   if (wasmModulePromise && wasmMode === wanted) return wasmModulePromise;
   wasmMode = wanted;
   wasmModulePromise = (async (): Promise<WasmAlignmentModule> => {
-    const moduleUrl = new URL(
-      preferSimd ? '../assets/alignment-wasm-simd.js' : '../assets/alignment-wasm.js',
-      import.meta.url,
-    );
+    const moduleUrl = new URL(preferSimd ? '../assets/alignment-wasm-simd.js' : '../assets/alignment-wasm.js', import.meta.url);
     const imported: unknown = await import(moduleUrl.href);
-    if (!isModuleNamespace(imported) || !isWasmFactory(imported.default)) {
-      throw new Error('Generated Emscripten module has an unexpected shape.');
-    }
-    return imported.default({
-      locateFile: (path: string): string => new URL(`../assets/${path}`, import.meta.url).href,
-    });
+    if (!isModuleNamespace(imported) || !isWasmFactory(imported.default)) throw new Error('Generated Emscripten module has an unexpected shape.');
+    return imported.default({ locateFile: (path: string): string => new URL(`../assets/${path}`, import.meta.url).href });
   })();
   return wasmModulePromise;
 }
@@ -147,19 +147,7 @@ async function scoreWithWasm(request: WorkerScoreRequest): Promise<Float64Array>
       const dx = request.candidates[index * 2];
       const dy = request.candidates[index * 2 + 1];
       if (dx === undefined || dy === undefined) throw new Error('Candidate pair is incomplete.');
-      scores[index] = module._score_translation(
-        firstPointer,
-        request.aw,
-        request.ah,
-        secondPointer,
-        request.bw,
-        request.bh,
-        dx,
-        dy,
-        request.sigma,
-        request.alphaThreshold,
-        request.normaliser,
-      );
+      scores[index] = module._score_translation(firstPointer, request.aw, request.ah, secondPointer, request.bw, request.bh, dx, dy, request.sigma, request.alphaThreshold, request.normaliser);
     }
     return scores;
   } finally {
@@ -176,19 +164,7 @@ function scoreWithJs(request: WorkerScoreRequest): Float64Array {
     const dx = request.candidates[index * 2];
     const dy = request.candidates[index * 2 + 1];
     if (dx === undefined || dy === undefined) throw new Error('Candidate pair is incomplete.');
-    scores[index] = jsScoreTranslation(
-      first,
-      request.aw,
-      request.ah,
-      second,
-      request.bw,
-      request.bh,
-      dx,
-      dy,
-      request.sigma,
-      request.alphaThreshold,
-      request.normaliser,
-    );
+    scores[index] = jsScoreTranslation(first, request.aw, request.ah, second, request.bw, request.bh, dx, dy, request.sigma, request.alphaThreshold, request.normaliser);
   }
   return scores;
 }
@@ -215,12 +191,7 @@ scope.addEventListener('message', (event: MessageEvent<unknown>) => {
       const response: WorkerScoreResponse = { id: request.id, scores, backend, error: null };
       scope.postMessage(response, [scores.buffer]);
     } catch (error: unknown) {
-      const response: WorkerScoreResponse = {
-        id: requestId,
-        scores: null,
-        backend: null,
-        error: errorMessage(error),
-      };
+      const response: WorkerScoreResponse = { id: requestId, scores: null, backend: null, error: errorMessage(error) };
       scope.postMessage(response);
     }
   })();
