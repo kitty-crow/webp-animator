@@ -2,7 +2,7 @@ import type { ModelExecutionProvider } from './inference/ort-runtime.js';
 import type { ComputeBackend, RegistrationSettings, ShiftResult } from './types.js';
 
 export type RifeMultiplier = 2 | 4 | 8;
-export type RenderInterpolationEngine = 'none' | 'rife' | 'resshift' | 'mog' | 'tooncrafter';
+export type RenderInterpolationEngine = 'none' | 'rife' | 'amt' | 'resshift' | 'mog' | 'tooncrafter';
 export type RenderProgressStage = 'preflight' | 'decode' | 'align' | 'interpolate' | 'encode';
 
 export interface TransferFrame {
@@ -175,7 +175,7 @@ function parseFiles(value: unknown): readonly File[] {
 }
 
 function parseInterpolationEngine(value: unknown): RenderInterpolationEngine {
-  if (value === 'none' || value === 'rife' || value === 'resshift' || value === 'mog' || value === 'tooncrafter') return value;
+  if (value === 'none' || value === 'rife' || value === 'amt' || value === 'resshift' || value === 'mog' || value === 'tooncrafter') return value;
   throw new Error('Render interpolation model is invalid.');
 }
 
