@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import { BROWSER_MODEL_CATALOG, browserModelDefinition } from '../src/inference/catalog.js';
 import { ddimStep, makeUniformDdimSchedule } from '../src/inference/ddim.js';
+import { dilatePlane } from '../src/inference/propainter-mask.js';
 
 describe('browser model catalogue', () => {
   test('model families are unique and use automatic WebGPU to WASM fallback', () => {
@@ -47,5 +48,18 @@ describe('DDIM browser scheduler', () => {
     );
     expect(output).toHaveLength(3);
     for (const value of output) expect(Number.isFinite(value)).toBe(true);
+  });
+});
+
+describe('ProPainter browser mask primitives', () => {
+  test('separable dilation matches a 3x3 max filter around one pixel', () => {
+    const source = new Float32Array(25);
+    source[12] = 1;
+    const output = dilatePlane(source, 5, 5, 1);
+    const selected: number[] = [];
+    for (let index = 0; index < output.length; index += 1) {
+      if ((output[index] ?? 0) > 0.5) selected.push(index);
+    }
+    expect(selected).toEqual([6, 7, 8, 11, 12, 13, 16, 17, 18]);
   });
 });
