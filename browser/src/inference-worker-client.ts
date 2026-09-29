@@ -1,5 +1,6 @@
 import type { ModelExecutionProvider } from './inference/ort-runtime.js';
 import type {
+  FrameGeneratorEngine,
   InferenceWorkerRequest,
   RenderInterpolationEngine,
   RenderProgressStage,
@@ -268,6 +269,8 @@ export class InferenceWorkerClient {
   renderFiles(
     files: readonly File[],
     registration: RegistrationSettings,
+    generator: FrameGeneratorEngine,
+    generatorManifestUrl: string | null,
     interpolation: RenderInterpolationEngine,
     modelManifestUrl: string | null,
     multiplier: RifeMultiplier,
@@ -284,8 +287,8 @@ export class InferenceWorkerClient {
       jobId: id,
       files,
       registration,
-      generator: 'none',
-      generatorManifestUrl: null,
+      generator,
+      generatorManifestUrl,
       interpolation,
       modelManifestUrl,
       multiplier,
