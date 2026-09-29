@@ -10,6 +10,7 @@ import {
   type StartRifeRequest,
   type TransferFrame,
 } from './inference-worker-protocol.js';
+import { interpolateAmtFrames } from './inference/amt-interpolation.js';
 import { interpolateGenerativeFrames, type GenerativeInterpolationEngine } from './inference/generative-interpolation.js';
 import { RifeOnnxAdapter } from './inference/rife.js';
 import { runPreflight } from './preflight.js';
@@ -257,10 +258,26 @@ async function interpolateRenderFrames(
   if (request.interpolation === 'rife') return interpolateRifeRenderFrames(request, frames, durations, hardware, computeBackend);
   const manifestUrl = request.modelManifestUrl;
   if (manifestUrl === null) throw new Error(`${request.interpolation} requires a model manifest URL.`);
-  const engine: GenerativeInterpolationEngine = request.interpolation;
   const total = (frames.length - 1) * (request.multiplier - 1);
+  if (request.interpolation === 'amt') {
+    renderProgress(request.jobId, 'interpolate', 0, total, null, computeBackend, 'Loading AMT model manifest');
+    return interpolateAmtFrames(
+      manifestUrl,
+      frames,
+      durations,
+      request.duration,
+      request.multiplier,
+      hardware,
+      (update) => {
+        ensureNotCancelled(request.jobId);
+        renderProgress(request.jobId, 'interpolate', update.current, update.total, update.provider, computeBackend, update.detail);
+      },
+      () => ensureNotCancelled(request.jobId),
+    );
+  }
+  const engine: GenerativeInterpolationEngine = request.interpolation;
   renderProgress(request.jobId, 'interpolate', 0, total, null, computeBackend, `Loading ${engine} model manifest`);
-  const result = await interpolateGenerativeFrames(
+  return interpolateGenerativeFrames(
     engine,
     manifestUrl,
     frames,
@@ -274,7 +291,6 @@ async function interpolateRenderFrames(
     },
     () => ensureNotCancelled(request.jobId),
   );
-  return result;
 }
 
 async function runRender(request: StartRenderRequest): Promise<void> {
