@@ -1,16 +1,19 @@
 import type { AmtAssetBundle, AmtScaleAsset } from './amt.js';
 import type { BrowserExternalDataAsset, BrowserModelAsset } from './catalog.js';
+import type { EdenAssetBundle, SpeedAssetBundle } from './frame-generator.js';
 import type { MogAssetBundle } from './mog.js';
 import type { ResShiftAssetBundle } from './resshift.js';
 import type { ToonCrafterAssetBundle } from './tooncrafter.js';
 
-export type ManifestBackedFamily = 'amt' | 'resshift' | 'mog' | 'tooncrafter';
+export type ManifestBackedFamily = 'amt' | 'resshift' | 'mog' | 'tooncrafter' | 'eden' | 'speed';
 
 export type LoadedModelManifest =
   | { readonly family: 'amt'; readonly bundle: AmtAssetBundle }
   | { readonly family: 'resshift'; readonly bundle: ResShiftAssetBundle }
   | { readonly family: 'mog'; readonly bundle: MogAssetBundle }
-  | { readonly family: 'tooncrafter'; readonly bundle: ToonCrafterAssetBundle };
+  | { readonly family: 'tooncrafter'; readonly bundle: ToonCrafterAssetBundle }
+  | { readonly family: 'eden'; readonly bundle: EdenAssetBundle }
+  | { readonly family: 'speed'; readonly bundle: SpeedAssetBundle };
 
 interface ManifestAssetRecord {
   readonly path: string;
@@ -38,6 +41,12 @@ function finiteNumber(record: Readonly<Record<string, unknown>>, key: string, la
 function positiveInteger(record: Readonly<Record<string, unknown>>, key: string, label: string): number {
   const value = finiteNumber(record, key, label);
   if (!Number.isInteger(value) || value <= 0) throw new Error(`${label}.${key} must be a positive integer.`);
+  return value;
+}
+
+function integerField(record: Readonly<Record<string, unknown>>, key: string, label: string): number {
+  const value = finiteNumber(record, key, label);
+  if (!Number.isInteger(value)) throw new Error(`${label}.${key} must be an integer.`);
   return value;
 }
 
@@ -154,6 +163,19 @@ function parseAmtScales(
   return ordered;
 }
 
+function parseSpeedScales(value: unknown): readonly number[] {
+  if (!Array.isArray(value) || value.length === 0) throw new Error('SPEED manifest scales must be a non-empty array.');
+  const scales = value.map((entry: unknown, index: number): number => {
+    if (typeof entry !== 'number' || !Number.isFinite(entry) || entry <= 0 || entry > 1) {
+      throw new Error(`scales[${index}] must be in (0, 1].`);
+    }
+    return entry;
+  });
+  const ordered = [...scales].sort((left, right) => right - left);
+  if (ordered[0] !== 1) throw new Error('SPEED manifest must include full scale 1.0.');
+  return ordered;
+}
+
 export async function loadModelManifest(
   manifestUrlText: string,
   expectedFamily: ManifestBackedFamily,
@@ -170,6 +192,34 @@ export async function loadModelManifest(
   const components = recordOf(root['components'], 'components');
   const assets = parseAssets(root['assets']);
   const make = (path: string): BrowserModelAsset => assetFor(manifestUrl, assets, path, expectedFamily, source, licence);
+
+  if (expectedFamily === 'eden') {
+    const cosSimStd = finiteNumber(root, 'cosSimStd', 'manifest');
+    if (cosSimStd === 0) throw new Error('manifest.cosSimStd must be non-zero.');
+    return {
+      family: 'eden',
+      bundle: {
+        generator: make(componentPath(components, 'generator')),
+        internalWidth: positiveInteger(root, 'internalWidth', 'manifest'),
+        internalHeight: positiveInteger(root, 'internalHeight', 'manifest'),
+        latentDim: positiveInteger(root, 'latentDim', 'manifest'),
+        cosSimMean: finiteNumber(root, 'cosSimMean', 'manifest'),
+        cosSimStd,
+        seed: integerField(root, 'seed', 'manifest'),
+      },
+    };
+  }
+
+  if (expectedFamily === 'speed') {
+    return {
+      family: 'speed',
+      bundle: {
+        generator: make(componentPath(components, 'generator')),
+        scales: parseSpeedScales(root['scales']),
+        seed: integerField(root, 'seed', 'manifest'),
+      },
+    };
+  }
 
   if (expectedFamily === 'amt') {
     return {
