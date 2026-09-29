@@ -38,7 +38,7 @@ describe('strict browser typing regression gate', () => {
     if (typeof compilerOptions !== 'object' || compilerOptions === null) throw new Error('tsconfig compilerOptions invalid.');
     const record = compilerOptions as Record<string, unknown>;
     for (const flag of requiredStrictFlags) expect(record[flag], `${flag} must stay enabled`).toBe(true);
-    expect(record.skipLibCheck, 'library checks must not be silently skipped').toBe(false);
+    expect(record['skipLibCheck'], 'library checks must not be silently skipped').toBe(false);
   });
 
   test('browser sources contain no explicit any or type-check suppression', async () => {
