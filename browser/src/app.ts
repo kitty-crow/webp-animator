@@ -3,10 +3,13 @@ import { decodeInputFiles } from './frame-codec.js';
 import { gpuLabel } from './hardware.js';
 import { InferenceWorkerClient, type RenderWorkerProgress } from './inference-worker-client.js';
 import type { RenderInterpolationEngine } from './inference-worker-protocol.js';
+import { interpolateAmtFrames } from './inference/amt-interpolation.js';
 import { interpolateGenerativeFrames, type GenerativeInterpolationEngine } from './inference/generative-interpolation.js';
 import { runPreflight } from './preflight.js';
 import type { ComputeBackend, PreflightResult, ProgressUpdate, RegistrationSettings, ShiftResult } from './types.js';
 import { encodeAnimatedWebp } from './webp-muxer.js';
+
+type ManifestInterpolationEngine = Exclude<RenderInterpolationEngine, 'none' | 'rife'>;
 
 function element<T extends HTMLElement>(id: string, constructor: { new (): T }): T {
   const candidate = document.getElementById(id);
@@ -65,7 +68,7 @@ function settings(): RegistrationSettings {
 
 function interpolationEngine(): RenderInterpolationEngine {
   const value = engineInput.value;
-  if (value === 'rife' || value === 'resshift' || value === 'mog' || value === 'tooncrafter') return value;
+  if (value === 'rife' || value === 'amt' || value === 'resshift' || value === 'mog' || value === 'tooncrafter') return value;
   return 'none';
 }
 
@@ -73,22 +76,27 @@ function isGenerative(engine: RenderInterpolationEngine): engine is GenerativeIn
   return engine === 'resshift' || engine === 'mog' || engine === 'tooncrafter';
 }
 
+function requiresManifest(engine: RenderInterpolationEngine): engine is ManifestInterpolationEngine {
+  return engine === 'amt' || isGenerative(engine);
+}
+
 function engineLabel(engine: RenderInterpolationEngine): string {
   if (engine === 'rife') return 'RIFE 4.25';
+  if (engine === 'amt') return 'AMT-S';
   if (engine === 'resshift') return 'Multi-Input ResShift';
   if (engine === 'mog') return 'MoG';
   if (engine === 'tooncrafter') return 'ToonCrafter';
   return 'disabled';
 }
 
-function manifestStorageKey(engine: GenerativeInterpolationEngine): string {
+function manifestStorageKey(engine: ManifestInterpolationEngine): string {
   return `webp-animator-model-manifest:${engine}`;
 }
 
 function syncManifestField(): void {
   const engine = interpolationEngine();
-  manifestField.hidden = !isGenerative(engine);
-  if (!isGenerative(engine)) {
+  manifestField.hidden = !requiresManifest(engine);
+  if (!requiresManifest(engine)) {
     manifestInput.value = '';
     return;
   }
@@ -96,7 +104,7 @@ function syncManifestField(): void {
 }
 
 function selectedManifestUrl(engine: RenderInterpolationEngine): string | null {
-  if (!isGenerative(engine)) return null;
+  if (!requiresManifest(engine)) return null;
   const value = manifestInput.value.trim();
   if (!value) throw new Error(`${engineLabel(engine)} requires the manifest.json produced by its browser exporter.`);
   return value;
@@ -189,7 +197,7 @@ function populateFooter(result: PreflightResult): void {
   const benchmarks = document.createElement('span');
   benchmarks.textContent = `Pre-flight: ${benchmarkLabel(result)}`;
   const models = document.createElement('span');
-  models.textContent = `Execution: ${workerPipeline} · RIFE 4.25 built in · ResShift/MoG/ToonCrafter adapters ready for exported manifests · ProPainter licence-gated`;
+  models.textContent = `Execution: ${workerPipeline} · RIFE 4.25 built in · AMT/ResShift/MoG/ToonCrafter adapters ready for exported manifests · ProPainter licence-gated`;
   footerResources.append(selected, details, benchmarks, models);
 }
 
@@ -262,6 +270,31 @@ async function interpolateRife(
 
 function ensureCompatibilityActive(): void {
   if (compatibilityCancelRequested) throw new DOMException('Inference job cancelled.', 'AbortError');
+}
+
+async function interpolateCompatibilityAmt(
+  manifestUrl: string,
+  frames: readonly ImageData[],
+  durations: readonly (number | null)[],
+  activePreflight: PreflightResult,
+): Promise<InterpolationSequence> {
+  const result = await interpolateAmtFrames(
+    manifestUrl,
+    frames,
+    durations,
+    outputDuration(),
+    interpolationMultiplier(),
+    activePreflight.profile,
+    (update) => {
+      ensureCompatibilityActive();
+      setProgress({ stage: 'interpolate', current: update.current, total: update.total });
+      progressText.textContent = `${update.detail} · ${update.current}/${update.total}`;
+      const provider = update.provider ? ` via ${update.provider}` : '';
+      setStatus(`AMT-S compatibility inference${provider}. Keep this tab active for best throughput.`);
+    },
+    ensureCompatibilityActive,
+  );
+  return result;
 }
 
 async function interpolateCompatibilityGenerative(
@@ -350,6 +383,9 @@ async function compatibilityRender(
     let interpolated: InterpolationSequence;
     if (interpolation === 'rife') {
       interpolated = await interpolateRife(rendered, decoded.sourceDurations, duration, interpolationMultiplier());
+    } else if (interpolation === 'amt') {
+      if (manifestUrl === null) throw new Error('AMT-S manifest URL is missing.');
+      interpolated = await interpolateCompatibilityAmt(manifestUrl, rendered, decoded.sourceDurations, activePreflight);
     } else if (isGenerative(interpolation)) {
       if (manifestUrl === null) throw new Error(`${engineLabel(interpolation)} manifest URL is missing.`);
       interpolated = await interpolateCompatibilityGenerative(interpolation, manifestUrl, rendered, decoded.sourceDurations, activePreflight);
@@ -425,7 +461,7 @@ fileInput.addEventListener('change', () => {
 engineInput.addEventListener('change', syncManifestField);
 manifestInput.addEventListener('change', () => {
   const engine = interpolationEngine();
-  if (!isGenerative(engine)) return;
+  if (!requiresManifest(engine)) return;
   const value = manifestInput.value.trim();
   if (value) localStorage.setItem(manifestStorageKey(engine), value);
   else localStorage.removeItem(manifestStorageKey(engine));
