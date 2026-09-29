@@ -2,7 +2,7 @@ import * as ort from 'onnxruntime-web/webgpu';
 
 import type { HardwareProfile } from '../types.js';
 import type { BrowserModelAsset } from './catalog.js';
-import { loadModelBytes } from './model-store.js';
+import { loadExternalDataBytes, loadModelBytes } from './model-store.js';
 
 export type ModelExecutionProvider = 'webgpu' | 'wasm';
 
@@ -23,14 +23,25 @@ function configureEnvironment(profile: HardwareProfile): void {
   ort.env.wasm.wasmPaths = new URL('../../vendor/', import.meta.url).href;
 }
 
+async function externalDataFor(asset: BrowserModelAsset): Promise<readonly ort.ExternalDataFileType[]> {
+  const external = asset.externalData ?? [];
+  return Promise.all(external.map(async (entry): Promise<ort.ExternalDataFileDescription> => ({
+    path: entry.path,
+    data: await loadExternalDataBytes(entry),
+  })));
+}
+
 async function createSession(
   bytes: Uint8Array,
+  asset: BrowserModelAsset,
   provider: ModelExecutionProvider,
 ): Promise<ort.InferenceSession> {
+  const externalData = await externalDataFor(asset);
   const options: ort.InferenceSession.SessionOptions = {
     executionProviders: provider === 'webgpu' ? ['webgpu', 'wasm'] : ['wasm'],
     graphOptimizationLevel: 'all',
     executionMode: 'sequential',
+    ...(externalData.length > 0 ? { externalData } : {}),
   };
   return ort.InferenceSession.create(bytes, options);
 }
@@ -45,7 +56,7 @@ export async function loadOrtModel(
   if (profile.webgpu.available) {
     try {
       return {
-        session: await createSession(bytes, 'webgpu'),
+        session: await createSession(bytes, asset, 'webgpu'),
         provider: 'webgpu',
         asset,
       };
@@ -55,7 +66,7 @@ export async function loadOrtModel(
   }
 
   return {
-    session: await createSession(bytes, 'wasm'),
+    session: await createSession(bytes, asset, 'wasm'),
     provider: 'wasm',
     asset,
   };
