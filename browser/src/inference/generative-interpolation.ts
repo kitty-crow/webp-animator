@@ -8,7 +8,7 @@ import { ResShiftOnnxAdapter } from './resshift.js';
 import type { NchwTensor } from './softsplat.js';
 import { ToonCrafterOnnxAdapter } from './tooncrafter.js';
 
-export type GenerativeInterpolationEngine = Exclude<RenderInterpolationEngine, 'none' | 'rife'>;
+export type GenerativeInterpolationEngine = Exclude<RenderInterpolationEngine, 'none' | 'rife' | 'amt'>;
 
 export interface GenerativeInterpolationProgress {
   readonly current: number;
@@ -150,6 +150,7 @@ export async function interpolateGenerativeFrames(
   if (frames.length < 2) throw new Error(`${engine} interpolation requires at least two frames.`);
   if (durations.length !== frames.length) throw new Error('Generative frame and duration counts differ.');
   const manifest = await loadModelManifest(manifestUrl, modelFamily(engine));
+  if (manifest.family === 'amt') throw new Error('AMT manifest cannot be used by the generative interpolation path.');
   const total = (frames.length - 1) * (multiplier - 1);
   let current = 0;
   const providers: ModelExecutionProvider[] = [];
