@@ -2,7 +2,7 @@ import type { ModelExecutionProvider } from './inference/ort-runtime.js';
 import type { ComputeBackend, RegistrationSettings, ShiftResult } from './types.js';
 
 export type RifeMultiplier = 2 | 4 | 8;
-export type RenderInterpolationEngine = 'none' | 'rife';
+export type RenderInterpolationEngine = 'none' | 'rife' | 'resshift' | 'mog' | 'tooncrafter';
 export type RenderProgressStage = 'preflight' | 'decode' | 'align' | 'interpolate' | 'encode';
 
 export interface TransferFrame {
@@ -26,6 +26,7 @@ export interface StartRenderRequest {
   readonly files: readonly File[];
   readonly registration: RegistrationSettings;
   readonly interpolation: RenderInterpolationEngine;
+  readonly modelManifestUrl: string | null;
   readonly multiplier: RifeMultiplier;
   readonly duration: number;
   readonly loop: number;
@@ -145,7 +146,7 @@ function parseDurations(value: unknown): readonly (number | null)[] {
 
 function parseMultiplier(value: unknown): RifeMultiplier {
   if (value === 2 || value === 4 || value === 8) return value;
-  throw new Error('RIFE multiplier must be 2, 4 or 8.');
+  throw new Error('Interpolation multiplier must be 2, 4 or 8.');
 }
 
 function parseRegistration(value: unknown): RegistrationSettings {
@@ -173,11 +174,25 @@ function parseFiles(value: unknown): readonly File[] {
   });
 }
 
+function parseInterpolationEngine(value: unknown): RenderInterpolationEngine {
+  if (value === 'none' || value === 'rife' || value === 'resshift' || value === 'mog' || value === 'tooncrafter') return value;
+  throw new Error('Render interpolation model is invalid.');
+}
+
+function parseManifestUrl(value: unknown, interpolation: RenderInterpolationEngine): string | null {
+  if (interpolation === 'none' || interpolation === 'rife') {
+    if (value === null || value === undefined || value === '') return null;
+    if (typeof value !== 'string') throw new Error('Render model manifest URL is invalid.');
+    return value;
+  }
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new Error(`${interpolation} requires an exported model manifest URL.`);
+  }
+  return value.trim();
+}
+
 function parseRender(record: Readonly<Record<string, unknown>>, jobId: string): StartRenderRequest {
-  const interpolationValue = record['interpolation'];
-  const interpolation: RenderInterpolationEngine = interpolationValue === 'rife' ? 'rife' : interpolationValue === 'none'
-    ? 'none'
-    : (() => { throw new Error('Render interpolation model is invalid.'); })();
+  const interpolation = parseInterpolationEngine(record['interpolation']);
   const duration = numericField(record, 'duration');
   const quality = numericField(record, 'quality');
   if (duration <= 0) throw new Error('Render duration must be positive.');
@@ -188,6 +203,7 @@ function parseRender(record: Readonly<Record<string, unknown>>, jobId: string): 
     files: parseFiles(record['files']),
     registration: parseRegistration(record['registration']),
     interpolation,
+    modelManifestUrl: parseManifestUrl(record['modelManifestUrl'], interpolation),
     multiplier: parseMultiplier(record['multiplier']),
     duration,
     loop: nonNegativeInteger(record, 'loop'),
