@@ -32,12 +32,15 @@ function zeroMetric(height: number, width: number): MetricTensor {
 }
 
 describe('ResShift softmax splat browser parity', () => {
-  test('zero flow is an identity transform regardless of a finite metric', () => {
+  test('zero flow is an identity transform within Float32 precision', () => {
     const input = tensor([1, 2, 3, 4], 1, 2, 2);
     const metric = zeroMetric(2, 2);
     metric.data.set([0.2, -0.4, 1.1, 0]);
     const output = softmaxSplatCpu(input, zeroFlow(2, 2), metric);
-    expect(Array.from(output.data)).toEqual([1, 2, 3, 4]);
+    const expected = [1, 2, 3, 4];
+    for (let index = 0; index < expected.length; index += 1) {
+      expect(output.data[index]).toBeCloseTo(expected[index] ?? 0, 6);
+    }
   });
 
   test('integer x flow splats a source sample into the next pixel', () => {
