@@ -13,6 +13,7 @@ import {
 import { interpolateAmtFrames } from './inference/amt-interpolation.js';
 import { generateMidpointAnchors } from './inference/frame-generator.js';
 import { interpolateGenerativeFrames, type GenerativeInterpolationEngine } from './inference/generative-interpolation.js';
+import { repairProPainterFrames } from './inference/propainter.js';
 import { RifeOnnxAdapter } from './inference/rife.js';
 import { runPreflight } from './preflight.js';
 import type { ComputeBackend, ProgressUpdate } from './types.js';
@@ -336,6 +337,43 @@ async function interpolateRenderFrames(
   );
 }
 
+async function repairRenderFrames(
+  request: StartRenderRequest,
+  frames: readonly ImageData[],
+  durations: readonly (number | null)[],
+  hardware: Awaited<ReturnType<typeof detectHardware>>,
+  computeBackend: ComputeBackend,
+): Promise<RenderSequence> {
+  if (request.repair === 'none' || frames.length < 3) return { frames, durations, provider: null };
+  const manifestUrl = request.repairManifestUrl;
+  if (manifestUrl === null) throw new Error('ProPainter requires a repair manifest URL.');
+  renderProgress(request.jobId, 'repair', 0, 1, null, computeBackend, 'Auditing temporal alpha holes');
+  const result = await repairProPainterFrames(
+    manifestUrl,
+    frames,
+    hardware,
+    (update) => {
+      ensureNotCancelled(request.jobId);
+      renderProgress(request.jobId, 'repair', update.current, update.total, update.provider, computeBackend, update.detail);
+    },
+    () => ensureNotCancelled(request.jobId),
+  );
+  if (result.windows === 0) {
+    renderProgress(request.jobId, 'repair', 1, 1, null, computeBackend, 'ProPainter · no repairable temporal alpha holes');
+  } else {
+    renderProgress(
+      request.jobId,
+      'repair',
+      result.windows,
+      result.windows,
+      result.provider,
+      computeBackend,
+      `ProPainter · repaired ${result.repairedPixels} pixels`,
+    );
+  }
+  return { frames: result.frames, durations, provider: result.provider };
+}
+
 async function runRender(request: StartRenderRequest): Promise<void> {
   if (activeJobId !== null) throw new Error(`Inference worker is already processing ${activeJobId}.`);
   activeJobId = request.jobId;
@@ -398,10 +436,21 @@ async function runRender(request: StartRenderRequest): Promise<void> {
     provider = mergeProvider(provider, interpolated.provider);
     ensureNotCancelled(request.jobId);
 
+    stage = 'repair';
+    const repaired = await repairRenderFrames(
+      request,
+      interpolated.frames,
+      interpolated.durations,
+      preflight.profile,
+      computeBackend,
+    );
+    provider = mergeProvider(provider, repaired.provider);
+    ensureNotCancelled(request.jobId);
+
     stage = 'encode';
-    const blob = await encodeAnimatedWebp(interpolated.frames, {
+    const blob = await encodeAnimatedWebp(repaired.frames, {
       duration: request.duration,
-      durations: interpolated.durations,
+      durations: repaired.durations,
       loop: request.loop,
       quality: request.quality,
     }, (completed, count) => {
