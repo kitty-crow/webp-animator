@@ -43,6 +43,16 @@ jobs:
         working-directory: browser
         run: bun run build
 
+      - name: Stage ONNX Runtime Web
+        run: |
+          mkdir -p browser/dist/vendor
+          cp browser/node_modules/onnxruntime-web/dist/ort.webgpu.bundle.min.mjs browser/dist/vendor/
+          find browser/node_modules/onnxruntime-web/dist -maxdepth 1 -type f \
+            \( -name 'ort-wasm*.wasm' -o -name 'ort-wasm*.mjs' \) \
+            -exec cp {} browser/dist/vendor/ \;
+          test -f browser/dist/vendor/ort.webgpu.bundle.min.mjs
+          test -n "$(find browser/dist/vendor -maxdepth 1 -name 'ort-wasm*.wasm' -print -quit)"
+
       - name: Set up Emscripten
         uses: mymindstorm/setup-emsdk@v14
         with:
@@ -89,6 +99,8 @@ jobs:
         run: |
           test -f browser/site/dist/src/app.js
           test -f browser/site/dist/src/alignment-worker.js
+          test -f browser/site/dist/src/inference/rife.js
+          test -f browser/site/dist/vendor/ort.webgpu.bundle.min.mjs
           test -f browser/site/dist/assets/alignment-wasm.wasm
           test -f browser/site/dist/assets/alignment-wasm-simd.wasm
           test -z "$(find browser/site -type f -name '*.ts' -print -quit)"
