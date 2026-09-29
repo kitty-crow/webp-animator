@@ -3,7 +3,8 @@ import type { ComputeBackend, RegistrationSettings, ShiftResult } from './types.
 
 export type RifeMultiplier = 2 | 4 | 8;
 export type RenderInterpolationEngine = 'none' | 'rife' | 'amt' | 'resshift' | 'mog' | 'tooncrafter';
-export type RenderProgressStage = 'preflight' | 'decode' | 'align' | 'interpolate' | 'encode';
+export type FrameGeneratorEngine = 'none' | 'eden' | 'speed';
+export type RenderProgressStage = 'preflight' | 'decode' | 'align' | 'generate' | 'interpolate' | 'encode';
 
 export interface TransferFrame {
   readonly width: number;
@@ -25,6 +26,8 @@ export interface StartRenderRequest {
   readonly jobId: string;
   readonly files: readonly File[];
   readonly registration: RegistrationSettings;
+  readonly generator: FrameGeneratorEngine;
+  readonly generatorManifestUrl: string | null;
   readonly interpolation: RenderInterpolationEngine;
   readonly modelManifestUrl: string | null;
   readonly multiplier: RifeMultiplier;
@@ -179,6 +182,11 @@ function parseInterpolationEngine(value: unknown): RenderInterpolationEngine {
   throw new Error('Render interpolation model is invalid.');
 }
 
+function parseGeneratorEngine(value: unknown): FrameGeneratorEngine {
+  if (value === 'none' || value === 'eden' || value === 'speed') return value;
+  throw new Error('Render frame generator is invalid.');
+}
+
 function parseManifestUrl(value: unknown, interpolation: RenderInterpolationEngine): string | null {
   if (interpolation === 'none' || interpolation === 'rife') {
     if (value === null || value === undefined || value === '') return null;
@@ -191,8 +199,21 @@ function parseManifestUrl(value: unknown, interpolation: RenderInterpolationEngi
   return value.trim();
 }
 
+function parseGeneratorManifestUrl(value: unknown, generator: FrameGeneratorEngine): string | null {
+  if (generator === 'none') {
+    if (value === null || value === undefined || value === '') return null;
+    if (typeof value !== 'string') throw new Error('Generator manifest URL is invalid.');
+    return value;
+  }
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new Error(`${generator} requires an exported generator manifest URL.`);
+  }
+  return value.trim();
+}
+
 function parseRender(record: Readonly<Record<string, unknown>>, jobId: string): StartRenderRequest {
   const interpolation = parseInterpolationEngine(record['interpolation']);
+  const generator = parseGeneratorEngine(record['generator']);
   const duration = numericField(record, 'duration');
   const quality = numericField(record, 'quality');
   if (duration <= 0) throw new Error('Render duration must be positive.');
@@ -202,6 +223,8 @@ function parseRender(record: Readonly<Record<string, unknown>>, jobId: string): 
     jobId,
     files: parseFiles(record['files']),
     registration: parseRegistration(record['registration']),
+    generator,
+    generatorManifestUrl: parseGeneratorManifestUrl(record['generatorManifestUrl'], generator),
     interpolation,
     modelManifestUrl: parseManifestUrl(record['modelManifestUrl'], interpolation),
     multiplier: parseMultiplier(record['multiplier']),
