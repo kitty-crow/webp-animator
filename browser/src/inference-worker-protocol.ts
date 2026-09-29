@@ -4,7 +4,8 @@ import type { ComputeBackend, RegistrationSettings, ShiftResult } from './types.
 export type RifeMultiplier = 2 | 4 | 8;
 export type RenderInterpolationEngine = 'none' | 'rife' | 'amt' | 'resshift' | 'mog' | 'tooncrafter';
 export type FrameGeneratorEngine = 'none' | 'eden' | 'speed';
-export type RenderProgressStage = 'preflight' | 'decode' | 'align' | 'generate' | 'interpolate' | 'encode';
+export type TemporalRepairEngine = 'none' | 'propainter';
+export type RenderProgressStage = 'preflight' | 'decode' | 'align' | 'generate' | 'interpolate' | 'repair' | 'encode';
 
 export interface TransferFrame {
   readonly width: number;
@@ -30,6 +31,8 @@ export interface StartRenderRequest {
   readonly generatorManifestUrl: string | null;
   readonly interpolation: RenderInterpolationEngine;
   readonly modelManifestUrl: string | null;
+  readonly repair: TemporalRepairEngine;
+  readonly repairManifestUrl: string | null;
   readonly multiplier: RifeMultiplier;
   readonly duration: number;
   readonly loop: number;
@@ -187,6 +190,11 @@ function parseGeneratorEngine(value: unknown): FrameGeneratorEngine {
   throw new Error('Render frame generator is invalid.');
 }
 
+function parseRepairEngine(value: unknown): TemporalRepairEngine {
+  if (value === 'none' || value === 'propainter') return value;
+  throw new Error('Render temporal repair model is invalid.');
+}
+
 function parseManifestUrl(value: unknown, interpolation: RenderInterpolationEngine): string | null {
   if (interpolation === 'none' || interpolation === 'rife') {
     if (value === null || value === undefined || value === '') return null;
@@ -211,9 +219,22 @@ function parseGeneratorManifestUrl(value: unknown, generator: FrameGeneratorEngi
   return value.trim();
 }
 
+function parseRepairManifestUrl(value: unknown, repair: TemporalRepairEngine): string | null {
+  if (repair === 'none') {
+    if (value === null || value === undefined || value === '') return null;
+    if (typeof value !== 'string') throw new Error('Repair manifest URL is invalid.');
+    return value;
+  }
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new Error(`${repair} requires an exported repair manifest URL.`);
+  }
+  return value.trim();
+}
+
 function parseRender(record: Readonly<Record<string, unknown>>, jobId: string): StartRenderRequest {
   const interpolation = parseInterpolationEngine(record['interpolation']);
   const generator = parseGeneratorEngine(record['generator']);
+  const repair = parseRepairEngine(record['repair']);
   const duration = numericField(record, 'duration');
   const quality = numericField(record, 'quality');
   if (duration <= 0) throw new Error('Render duration must be positive.');
@@ -227,6 +248,8 @@ function parseRender(record: Readonly<Record<string, unknown>>, jobId: string): 
     generatorManifestUrl: parseGeneratorManifestUrl(record['generatorManifestUrl'], generator),
     interpolation,
     modelManifestUrl: parseManifestUrl(record['modelManifestUrl'], interpolation),
+    repair,
+    repairManifestUrl: parseRepairManifestUrl(record['repairManifestUrl'], repair),
     multiplier: parseMultiplier(record['multiplier']),
     duration,
     loop: nonNegativeInteger(record, 'loop'),
