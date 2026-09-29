@@ -8,6 +8,9 @@
     "test": "bun test tests",
     "test:strict-types": "bun test tests/no-loose-types.test.ts"
   },
+  "dependencies": {
+    "onnxruntime-web": "1.30.0"
+  },
   "devDependencies": {
     "@types/bun": "^1.2.23",
     "@webgpu/types": "^0.1.65",
