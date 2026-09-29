@@ -51,7 +51,14 @@
         <select id="interpolation-engine">
           <option value="none">None</option>
           <option value="rife">RIFE 4.25 ONNX</option>
+          <option value="resshift">Multi-Input ResShift</option>
+          <option value="mog">MoG generative VFI</option>
+          <option value="tooncrafter">ToonCrafter</option>
         </select>
+      </label>
+      <label id="model-manifest-field" hidden>Exported model manifest URL
+        <input id="model-manifest-url" type="url" inputmode="url" autocomplete="off" placeholder="https://…/manifest.json">
+        <span class="muted">The manifest points to exported ONNX graphs and their SHA-256-verified external-data shards. The URL is remembered only in this browser.</span>
       </label>
       <label>Interpolation multiplier
         <select id="interpolation-multiplier">
@@ -71,7 +78,7 @@
       <progress id="progress" value="0" max="1"></progress>
       <p id="progress-text" class="muted">Idle</p>
       <p id="status" role="status" aria-live="polite"></p>
-      <p class="muted">Once processing starts, model inference runs in a dedicated worker. The tab may remain open in the background; browsers may still reduce compute when the whole browser or device is suspended.</p>
+      <p class="muted">Once processing starts, model inference runs in a dedicated worker when the browser supports worker OffscreenCanvas. The tab may remain open in the background; browsers may still reduce compute when the whole browser or device is suspended.</p>
     </section>
 
     <section class="card output">
