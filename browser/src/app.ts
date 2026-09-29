@@ -2,14 +2,16 @@ import { AdaptiveAlignmentEngine, renderUnionFrames } from './alignment.js';
 import { decodeInputFiles } from './frame-codec.js';
 import { gpuLabel } from './hardware.js';
 import { InferenceWorkerClient, type RenderWorkerProgress } from './inference-worker-client.js';
-import type { RenderInterpolationEngine } from './inference-worker-protocol.js';
+import type { FrameGeneratorEngine, RenderInterpolationEngine } from './inference-worker-protocol.js';
 import { interpolateAmtFrames } from './inference/amt-interpolation.js';
+import { generateMidpointAnchors } from './inference/frame-generator.js';
 import { interpolateGenerativeFrames, type GenerativeInterpolationEngine } from './inference/generative-interpolation.js';
 import { runPreflight } from './preflight.js';
 import type { ComputeBackend, PreflightResult, ProgressUpdate, RegistrationSettings, ShiftResult } from './types.js';
 import { encodeAnimatedWebp } from './webp-muxer.js';
 
 type ManifestInterpolationEngine = Exclude<RenderInterpolationEngine, 'none' | 'rife'>;
+type ManifestGeneratorEngine = Exclude<FrameGeneratorEngine, 'none'>;
 
 function element<T extends HTMLElement>(id: string, constructor: { new (): T }): T {
   const candidate = document.getElementById(id);
@@ -45,6 +47,9 @@ const footerResources = element('resource-footer', HTMLDivElement);
 const manifestField = element('model-manifest-field', HTMLLabelElement);
 const manifestInput = element('model-manifest-url', HTMLInputElement);
 const engineInput = selectInput('interpolation-engine');
+const generatorManifestField = element('generator-manifest-field', HTMLLabelElement);
+const generatorManifestInput = element('generator-manifest-url', HTMLInputElement);
+const generatorInput = selectInput('frame-generator');
 const inferenceWorker = new InferenceWorkerClient();
 
 let preflight: PreflightResult | null = null;
@@ -72,12 +77,21 @@ function interpolationEngine(): RenderInterpolationEngine {
   return 'none';
 }
 
+function frameGenerator(): FrameGeneratorEngine {
+  const value = generatorInput.value;
+  return value === 'eden' || value === 'speed' ? value : 'none';
+}
+
 function isGenerative(engine: RenderInterpolationEngine): engine is GenerativeInterpolationEngine {
   return engine === 'resshift' || engine === 'mog' || engine === 'tooncrafter';
 }
 
 function requiresManifest(engine: RenderInterpolationEngine): engine is ManifestInterpolationEngine {
   return engine === 'amt' || isGenerative(engine);
+}
+
+function requiresGeneratorManifest(generator: FrameGeneratorEngine): generator is ManifestGeneratorEngine {
+  return generator === 'eden' || generator === 'speed';
 }
 
 function engineLabel(engine: RenderInterpolationEngine): string {
@@ -89,8 +103,18 @@ function engineLabel(engine: RenderInterpolationEngine): string {
   return 'disabled';
 }
 
+function generatorLabel(generator: FrameGeneratorEngine): string {
+  if (generator === 'eden') return 'EDEN';
+  if (generator === 'speed') return 'SPEED';
+  return 'disabled';
+}
+
 function manifestStorageKey(engine: ManifestInterpolationEngine): string {
   return `webp-animator-model-manifest:${engine}`;
+}
+
+function generatorManifestStorageKey(generator: ManifestGeneratorEngine): string {
+  return `webp-animator-generator-manifest:${generator}`;
 }
 
 function syncManifestField(): void {
@@ -103,10 +127,27 @@ function syncManifestField(): void {
   manifestInput.value = localStorage.getItem(manifestStorageKey(engine)) ?? '';
 }
 
+function syncGeneratorManifestField(): void {
+  const generator = frameGenerator();
+  generatorManifestField.hidden = !requiresGeneratorManifest(generator);
+  if (!requiresGeneratorManifest(generator)) {
+    generatorManifestInput.value = '';
+    return;
+  }
+  generatorManifestInput.value = localStorage.getItem(generatorManifestStorageKey(generator)) ?? '';
+}
+
 function selectedManifestUrl(engine: RenderInterpolationEngine): string | null {
   if (!requiresManifest(engine)) return null;
   const value = manifestInput.value.trim();
   if (!value) throw new Error(`${engineLabel(engine)} requires the manifest.json produced by its browser exporter.`);
+  return value;
+}
+
+function selectedGeneratorManifestUrl(generator: FrameGeneratorEngine): string | null {
+  if (!requiresGeneratorManifest(generator)) return null;
+  const value = generatorManifestInput.value.trim();
+  if (!value) throw new Error(`${generatorLabel(generator)} requires the manifest.json produced by its browser exporter.`);
   return value;
 }
 
@@ -127,6 +168,15 @@ function outputQuality(): number {
   return Math.max(0.01, Math.min(1, (Number(numberInput('quality').value) || 95) / 100));
 }
 
+function mergeProvider(
+  current: 'webgpu' | 'wasm' | null,
+  next: 'webgpu' | 'wasm' | null,
+): 'webgpu' | 'wasm' | null {
+  if (next === null) return current;
+  if (current === null) return next;
+  return current === 'wasm' || next === 'wasm' ? 'wasm' : 'webgpu';
+}
+
 function setStatus(message: string, kind: 'neutral' | 'error' | 'success' = 'neutral'): void {
   status.textContent = message;
   status.dataset['kind'] = kind;
@@ -139,9 +189,11 @@ function setProgress(update: ProgressUpdate): void {
     ? `Decoding${update.fileName ? ` ${update.fileName}` : ''}`
     : update.stage === 'align'
       ? 'Aligning frames'
-      : update.stage === 'interpolate'
-        ? 'Generating intermediate frames'
-        : 'Encoding WebP';
+      : update.stage === 'generate'
+        ? 'Generating midpoint anchors'
+        : update.stage === 'interpolate'
+          ? 'Generating intermediate frames'
+          : 'Encoding WebP';
   progressText.textContent = `${label} · ${update.current}/${update.total}`;
 }
 
@@ -154,7 +206,9 @@ function setWorkerProgress(update: RenderWorkerProgress): void {
     setProgress({ stage: 'decode', current: update.current, total: update.total, fileName: update.detail });
   } else {
     setProgress({ stage: update.stage, current: update.current, total: update.total });
-    if (update.stage === 'interpolate' && update.detail) progressText.textContent = `${update.detail} · ${update.current}/${update.total}`;
+    if ((update.stage === 'generate' || update.stage === 'interpolate') && update.detail) {
+      progressText.textContent = `${update.detail} · ${update.current}/${update.total}`;
+    }
   }
 
   const backend = update.computeBackend === null ? '' : ` · ${update.computeBackend}`;
@@ -197,7 +251,7 @@ function populateFooter(result: PreflightResult): void {
   const benchmarks = document.createElement('span');
   benchmarks.textContent = `Pre-flight: ${benchmarkLabel(result)}`;
   const models = document.createElement('span');
-  models.textContent = `Execution: ${workerPipeline} · RIFE 4.25 built in · AMT/ResShift/MoG/ToonCrafter adapters ready for exported manifests · ProPainter licence-gated`;
+  models.textContent = `Execution: ${workerPipeline} · RIFE 4.25 built in · EDEN/SPEED/AMT/ResShift/MoG/ToonCrafter adapters ready for exported manifests · ProPainter licence-gated`;
   footerResources.append(selected, details, benchmarks, models);
 }
 
@@ -229,6 +283,7 @@ interface FinalRenderResult {
   readonly computeBackend: ComputeBackend;
   readonly pairwise: readonly ShiftResult[];
   readonly mode: 'persistent-worker' | 'compatibility';
+  readonly generator: FrameGeneratorEngine;
   readonly interpolation: RenderInterpolationEngine;
 }
 
@@ -272,13 +327,38 @@ function ensureCompatibilityActive(): void {
   if (compatibilityCancelRequested) throw new DOMException('Inference job cancelled.', 'AbortError');
 }
 
+async function generateCompatibility(
+  generator: ManifestGeneratorEngine,
+  manifestUrl: string,
+  frames: readonly ImageData[],
+  durations: readonly (number | null)[],
+  activePreflight: PreflightResult,
+): Promise<InterpolationSequence> {
+  return generateMidpointAnchors(
+    generator,
+    manifestUrl,
+    frames,
+    durations,
+    outputDuration(),
+    activePreflight.profile,
+    (update) => {
+      ensureCompatibilityActive();
+      setProgress({ stage: 'generate', current: update.current, total: update.total });
+      progressText.textContent = `${update.detail} · ${update.current}/${update.total}`;
+      const provider = update.provider ? ` via ${update.provider}` : '';
+      setStatus(`${generatorLabel(generator)} compatibility generation${provider}. Keep this tab active for best throughput.`);
+    },
+    ensureCompatibilityActive,
+  );
+}
+
 async function interpolateCompatibilityAmt(
   manifestUrl: string,
   frames: readonly ImageData[],
   durations: readonly (number | null)[],
   activePreflight: PreflightResult,
 ): Promise<InterpolationSequence> {
-  const result = await interpolateAmtFrames(
+  return interpolateAmtFrames(
     manifestUrl,
     frames,
     durations,
@@ -294,7 +374,6 @@ async function interpolateCompatibilityAmt(
     },
     ensureCompatibilityActive,
   );
-  return result;
 }
 
 async function interpolateCompatibilityGenerative(
@@ -304,7 +383,7 @@ async function interpolateCompatibilityGenerative(
   durations: readonly (number | null)[],
   activePreflight: PreflightResult,
 ): Promise<InterpolationSequence> {
-  const result = await interpolateGenerativeFrames(
+  return interpolateGenerativeFrames(
     engine,
     manifestUrl,
     frames,
@@ -321,17 +400,20 @@ async function interpolateCompatibilityGenerative(
     },
     ensureCompatibilityActive,
   );
-  return result;
 }
 
 async function persistentRender(
   files: readonly File[],
+  generator: FrameGeneratorEngine,
+  generatorManifestUrl: string | null,
   interpolation: RenderInterpolationEngine,
   manifestUrl: string | null,
 ): Promise<FinalRenderResult> {
   const started = inferenceWorker.renderFiles(
     files,
     settings(),
+    generator,
+    generatorManifestUrl,
     interpolation,
     manifestUrl,
     interpolationMultiplier(),
@@ -350,6 +432,7 @@ async function persistentRender(
       computeBackend: result.computeBackend,
       pairwise: result.pairwise,
       mode: 'persistent-worker',
+      generator,
       interpolation,
     };
   } finally {
@@ -360,6 +443,8 @@ async function persistentRender(
 async function compatibilityRender(
   files: readonly File[],
   activePreflight: PreflightResult,
+  generator: FrameGeneratorEngine,
+  generatorManifestUrl: string | null,
   interpolation: RenderInterpolationEngine,
   manifestUrl: string | null,
 ): Promise<FinalRenderResult> {
@@ -380,17 +465,24 @@ async function compatibilityRender(
     });
     const rendered = renderUnionFrames(decoded.frames, registration.positions);
     const duration = outputDuration();
+
+    let generated = passthroughSequence(rendered, decoded.sourceDurations);
+    if (requiresGeneratorManifest(generator)) {
+      if (generatorManifestUrl === null) throw new Error(`${generatorLabel(generator)} manifest URL is missing.`);
+      generated = await generateCompatibility(generator, generatorManifestUrl, rendered, decoded.sourceDurations, activePreflight);
+    }
+
     let interpolated: InterpolationSequence;
     if (interpolation === 'rife') {
-      interpolated = await interpolateRife(rendered, decoded.sourceDurations, duration, interpolationMultiplier());
+      interpolated = await interpolateRife(generated.frames, generated.durations, duration, interpolationMultiplier());
     } else if (interpolation === 'amt') {
       if (manifestUrl === null) throw new Error('AMT-S manifest URL is missing.');
-      interpolated = await interpolateCompatibilityAmt(manifestUrl, rendered, decoded.sourceDurations, activePreflight);
+      interpolated = await interpolateCompatibilityAmt(manifestUrl, generated.frames, generated.durations, activePreflight);
     } else if (isGenerative(interpolation)) {
       if (manifestUrl === null) throw new Error(`${engineLabel(interpolation)} manifest URL is missing.`);
-      interpolated = await interpolateCompatibilityGenerative(interpolation, manifestUrl, rendered, decoded.sourceDurations, activePreflight);
+      interpolated = await interpolateCompatibilityGenerative(interpolation, manifestUrl, generated.frames, generated.durations, activePreflight);
     } else {
-      interpolated = passthroughSequence(rendered, decoded.sourceDurations);
+      interpolated = passthroughSequence(generated.frames, generated.durations);
     }
     ensureCompatibilityActive();
     const blob = await encodeAnimatedWebp(interpolated.frames, {
@@ -404,10 +496,11 @@ async function compatibilityRender(
     });
     return {
       blob,
-      provider: interpolated.provider,
+      provider: mergeProvider(generated.provider, interpolated.provider),
       computeBackend: activePreflight.selectedBackend,
       pairwise: registration.pairwise,
       mode: 'compatibility',
+      generator,
       interpolation,
     };
   } finally {
@@ -427,13 +520,17 @@ function publishResult(result: FinalRenderResult): void {
   const alignmentReport = result.pairwise
     .map((entry, index) => `frame ${index + 2}: dx=${entry.dx}, dy=${entry.dy}, score=${entry.score.toFixed(6)}`)
     .join('\n');
-  const modelReport = result.provider === null
+  const generatorReport = result.generator === 'none'
+    ? 'Generator: disabled'
+    : `Generator: ${generatorLabel(result.generator)}`;
+  const modelReport = result.interpolation === 'none'
     ? 'Interpolation: disabled'
-    : `Interpolation: ${engineLabel(result.interpolation)} via ${result.provider}`;
+    : `Interpolation: ${engineLabel(result.interpolation)}`;
+  const providerReport = result.provider === null ? 'Model provider: none' : `Model provider: ${result.provider}`;
   const modeReport = result.mode === 'persistent-worker'
     ? `Pipeline: persistent worker via ${result.computeBackend}`
     : `Pipeline: compatibility coordinator via ${result.computeBackend}`;
-  results.textContent = `${modeReport}\n${modelReport}\n${alignmentReport}`;
+  results.textContent = `${modeReport}\n${generatorReport}\n${modelReport}\n${providerReport}\n${alignmentReport}`;
   progress.value = 1;
   progressText.textContent = 'Complete';
   setStatus(`Finished entirely on this device with ${result.computeBackend}.`, 'success');
@@ -441,6 +538,7 @@ function publishResult(result: FinalRenderResult): void {
 
 async function initialise(): Promise<void> {
   syncManifestField();
+  syncGeneratorManifestField();
   preflightStatus.textContent = 'Running automatic hardware pre-flight…';
   await ensureIsolationServiceWorker();
   try {
@@ -459,12 +557,20 @@ fileInput.addEventListener('change', () => {
 });
 
 engineInput.addEventListener('change', syncManifestField);
+generatorInput.addEventListener('change', syncGeneratorManifestField);
 manifestInput.addEventListener('change', () => {
   const engine = interpolationEngine();
   if (!requiresManifest(engine)) return;
   const value = manifestInput.value.trim();
   if (value) localStorage.setItem(manifestStorageKey(engine), value);
   else localStorage.removeItem(manifestStorageKey(engine));
+});
+generatorManifestInput.addEventListener('change', () => {
+  const generator = frameGenerator();
+  if (!requiresGeneratorManifest(generator)) return;
+  const value = generatorManifestInput.value.trim();
+  if (value) localStorage.setItem(generatorManifestStorageKey(generator), value);
+  else localStorage.removeItem(generatorManifestStorageKey(generator));
 });
 
 cancelButton.addEventListener('click', () => {
@@ -500,14 +606,18 @@ runButton.addEventListener('click', () => {
     runButton.disabled = true;
     cancelButton.disabled = true;
     progress.value = 0;
+    const generator = frameGenerator();
     const interpolation = interpolationEngine();
     try {
+      const generatorManifestUrl = selectedGeneratorManifestUrl(generator);
       const manifestUrl = selectedManifestUrl(interpolation);
-      setStatus(`Processing entirely on this device${interpolation === 'none' ? '' : ` with ${engineLabel(interpolation)}`}…`);
+      const generatorText = generator === 'none' ? '' : ` with ${generatorLabel(generator)}`;
+      const interpolationText = interpolation === 'none' ? '' : ` and ${engineLabel(interpolation)}`;
+      setStatus(`Processing entirely on this device${generatorText}${interpolationText}…`);
       const usePersistentWorker = activePreflight.profile.workerSupport && activePreflight.profile.offscreenCanvas;
       const result = usePersistentWorker
-        ? await persistentRender(files, interpolation, manifestUrl)
-        : await compatibilityRender(files, activePreflight, interpolation, manifestUrl);
+        ? await persistentRender(files, generator, generatorManifestUrl, interpolation, manifestUrl)
+        : await compatibilityRender(files, activePreflight, generator, generatorManifestUrl, interpolation, manifestUrl);
       publishResult(result);
     } catch (error: unknown) {
       if (error instanceof DOMException && error.name === 'AbortError') {
