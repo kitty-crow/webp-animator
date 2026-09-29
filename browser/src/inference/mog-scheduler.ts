@@ -154,9 +154,11 @@ export function makeMogDdimSchedule(config: MogScheduleConfig = DEFAULT_MOG_SCHE
       * Math.max(0, 1 - alpha / Math.max(alphaPrevious, 1e-20)),
     );
     const dynamicScale = mogDynamicScale(timestep, config);
-    const dynamicScalePrevious = previousTimestep === null
-      ? dynamicScale
-      : mogDynamicScale(previousTimestep, config);
+    let dynamicScalePrevious = dynamicScale;
+    if (previousTimestep !== null) {
+      if (previousTimestep === undefined) throw new Error('MoG previous timestep is missing.');
+      dynamicScalePrevious = mogDynamicScale(previousTimestep, config);
+    }
     steps.push({ trainingTimestep: timestep, alpha, alphaPrevious, sigma, dynamicScale, dynamicScalePrevious });
   }
   return steps;
