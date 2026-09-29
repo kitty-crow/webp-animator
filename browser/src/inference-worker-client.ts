@@ -1,7 +1,6 @@
 import type { ModelExecutionProvider } from './inference/ort-runtime.js';
 import type {
   InferenceWorkerRequest,
-  InferenceWorkerResponse,
   RifeMultiplier,
   TransferFrame,
 } from './inference-worker-protocol.js';
@@ -43,6 +42,28 @@ function imageFrame(frame: TransferFrame): ImageData {
   return new ImageData(new Uint8ClampedArray(frame.buffer), frame.width, frame.height);
 }
 
+function parseTransferFrame(value: unknown): TransferFrame {
+  if (typeof value !== 'object' || value === null) throw new Error('Inference worker returned an invalid frame.');
+  const record = value as Record<string, unknown>;
+  const width = record['width'];
+  const height = record['height'];
+  const buffer = record['buffer'];
+  if (typeof width !== 'number' || !Number.isInteger(width) || width <= 0) throw new Error('Inference worker frame width is invalid.');
+  if (typeof height !== 'number' || !Number.isInteger(height) || height <= 0) throw new Error('Inference worker frame height is invalid.');
+  if (!(buffer instanceof ArrayBuffer)) throw new Error('Inference worker frame buffer is invalid.');
+  if (buffer.byteLength !== width * height * 4) throw new Error('Inference worker frame byte length is invalid.');
+  return { width, height, buffer };
+}
+
+function parseDurations(value: unknown): readonly (number | null)[] {
+  if (!Array.isArray(value)) throw new Error('Inference worker durations are invalid.');
+  return value.map((entry: unknown): number | null => {
+    if (entry === null) return null;
+    if (typeof entry !== 'number' || !Number.isFinite(entry) || entry <= 0) throw new Error('Inference worker duration is invalid.');
+    return entry;
+  });
+}
+
 function jobId(counter: number): string {
   return `rife-${Date.now().toString(36)}-${counter.toString(36)}`;
 }
@@ -64,48 +85,60 @@ export class InferenceWorkerClient {
 
   private handleMessage(value: unknown): void {
     if (typeof value !== 'object' || value === null) return;
-    const message = value as Partial<InferenceWorkerResponse>;
-    if (typeof message.jobId !== 'string' || typeof message.type !== 'string') return;
-    const pending = this.pending.get(message.jobId);
+    const message = value as Record<string, unknown>;
+    const type = message['type'];
+    const id = message['jobId'];
+    if (typeof type !== 'string' || typeof id !== 'string') return;
+    const pending = this.pending.get(id);
     if (!pending) return;
 
-    if (message.type === 'progress') {
+    if (type === 'progress') {
+      const stage = message['stage'];
+      const current = message['current'];
+      const total = message['total'];
+      const provider = message['provider'];
       if (
-        (message.stage === 'initialising' || message.stage === 'interpolating') &&
-        typeof message.current === 'number' &&
-        typeof message.total === 'number' &&
-        (message.provider === 'webgpu' || message.provider === 'wasm' || message.provider === null)
+        (stage === 'initialising' || stage === 'interpolating') &&
+        typeof current === 'number' && Number.isFinite(current) &&
+        typeof total === 'number' && Number.isFinite(total) &&
+        (provider === 'webgpu' || provider === 'wasm' || provider === null)
       ) {
-        pending.onProgress({
-          stage: message.stage,
-          current: message.current,
-          total: message.total,
-          provider: message.provider,
-        });
+        pending.onProgress({ stage, current, total, provider });
       }
       return;
     }
 
-    this.pending.delete(message.jobId);
-    if (message.type === 'cancelled') {
+    this.pending.delete(id);
+    if (type === 'cancelled') {
       pending.reject(new DOMException('Inference job cancelled.', 'AbortError'));
       return;
     }
-    if (message.type === 'error') {
-      pending.reject(new Error(typeof message.message === 'string' ? message.message : 'Inference worker failed.'));
+    if (type === 'error') {
+      pending.reject(new Error(typeof message['message'] === 'string' ? message['message'] : 'Inference worker failed.'));
       return;
     }
-    if (
-      message.type === 'complete' &&
-      Array.isArray(message.frames) &&
-      Array.isArray(message.durations) &&
-      (message.provider === 'webgpu' || message.provider === 'wasm')
-    ) {
-      const frames = message.frames.map((frame: TransferFrame) => imageFrame(frame));
-      pending.resolve({ frames, durations: message.durations, provider: message.provider });
+    if (type === 'complete') {
+      const rawFrames = message['frames'];
+      const provider = message['provider'];
+      if (!Array.isArray(rawFrames) || (provider !== 'webgpu' && provider !== 'wasm')) {
+        pending.reject(new Error('Inference worker returned an invalid completion message.'));
+        return;
+      }
+      try {
+        const transferred = rawFrames.map(parseTransferFrame);
+        const durations = parseDurations(message['durations']);
+        if (durations.length !== transferred.length) throw new Error('Inference worker frame and duration counts differ.');
+        pending.resolve({
+          frames: transferred.map(imageFrame),
+          durations,
+          provider,
+        });
+      } catch (error: unknown) {
+        pending.reject(error instanceof Error ? error : new Error(String(error)));
+      }
       return;
     }
-    pending.reject(new Error('Inference worker returned an invalid completion message.'));
+    pending.reject(new Error(`Inference worker returned unsupported message type ${type}.`));
   }
 
   interpolateRife(
