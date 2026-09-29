@@ -32,9 +32,7 @@ function chunkCandidates(candidates: Int32Array, count: number): readonly Int32A
 }
 
 function toShared(bytes: Uint8ClampedArray): Uint8Array {
-  if (bytes.buffer instanceof SharedArrayBuffer) {
-    return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  }
+  if (bytes.buffer instanceof SharedArrayBuffer) return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const shared = new SharedArrayBuffer(bytes.byteLength);
   const view = new Uint8Array(shared);
   view.set(bytes);
@@ -44,15 +42,15 @@ function toShared(bytes: Uint8ClampedArray): Uint8Array {
 function parseWorkerResponse(value: unknown): WorkerScoreResponse {
   if (typeof value !== 'object' || value === null) throw new Error('Worker returned a non-object response.');
   const record = value as Record<string, unknown>;
-  if (typeof record.id !== 'number') throw new Error('Worker response is missing request id.');
-  if (typeof record.error === 'string') {
-    return { id: record.id, scores: null, backend: null, error: record.error };
-  }
-  if (!(record.scores instanceof Float64Array)) throw new Error('Worker response is missing score data.');
-  if (record.backend !== 'wasm-simd' && record.backend !== 'wasm' && record.backend !== 'js') {
-    throw new Error('Worker response has an unknown backend.');
-  }
-  return { id: record.id, scores: record.scores, backend: record.backend, error: null };
+  const id = record['id'];
+  const error = record['error'];
+  const scores = record['scores'];
+  const backend = record['backend'];
+  if (typeof id !== 'number') throw new Error('Worker response is missing request id.');
+  if (typeof error === 'string') return { id, scores: null, backend: null, error };
+  if (!(scores instanceof Float64Array)) throw new Error('Worker response is missing score data.');
+  if (backend !== 'wasm-simd' && backend !== 'wasm' && backend !== 'js') throw new Error('Worker response has an unknown backend.');
+  return { id, scores, backend, error: null };
 }
 
 export class AlignmentWorkerPool {
@@ -85,9 +83,7 @@ export class AlignmentWorkerPool {
         if (response.error !== null) callback.reject(new Error(response.error));
         else callback.resolve(response);
       });
-      worker.addEventListener('error', (event: ErrorEvent) => {
-        console.error('Alignment worker error.', event.error ?? event.message);
-      });
+      worker.addEventListener('error', (event: ErrorEvent) => console.error('Alignment worker error.', event.error ?? event.message));
       this.workers.push(worker);
     }
   }
@@ -101,12 +97,7 @@ export class AlignmentWorkerPool {
     });
   }
 
-  async scoreCandidates(
-    first: ImageData,
-    second: ImageData,
-    candidates: Int32Array,
-    options: ScoreOptions,
-  ): Promise<Float64Array> {
+  async scoreCandidates(first: ImageData, second: ImageData, candidates: Int32Array, options: ScoreOptions): Promise<Float64Array> {
     if (candidates.length === 0) return new Float64Array();
     const candidateCount = candidates.length / 2;
     const workerCount = Math.min(this.workers.length, Math.max(1, candidateCount));
