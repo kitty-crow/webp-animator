@@ -89,7 +89,7 @@ function assetFor(
   };
 }
 
-function parseMogSchedule(value: unknown): MogAssetBundle['schedule'] {
+function parseMogSchedule(value: unknown): NonNullable<MogAssetBundle['schedule']> {
   const record = recordOf(value, 'ddim');
   const spacing = stringField(record, 'spacing', 'ddim');
   if (spacing !== 'uniform' && spacing !== 'uniform_trailing') throw new Error('ddim.spacing is invalid.');
@@ -112,7 +112,7 @@ function parseMogSchedule(value: unknown): MogAssetBundle['schedule'] {
   };
 }
 
-function parseToonSchedule(value: unknown): ToonCrafterAssetBundle['schedule'] {
+function parseToonSchedule(value: unknown): NonNullable<ToonCrafterAssetBundle['schedule']> {
   const record = recordOf(value, 'ddim');
   const zeroTerminalSnr = record['zeroTerminalSnr'];
   if (typeof zeroTerminalSnr !== 'boolean') throw new Error('ddim.zeroTerminalSnr must be boolean.');
