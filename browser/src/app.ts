@@ -1,6 +1,7 @@
 import { AdaptiveAlignmentEngine, renderUnionFrames } from './alignment.js';
 import { decodeInputFiles } from './frame-codec.js';
 import { gpuLabel } from './hardware.js';
+import { InferenceWorkerClient } from './inference-worker-client.js';
 import { runPreflight } from './preflight.js';
 import type { PreflightResult, ProgressUpdate, RegistrationSettings } from './types.js';
 import { encodeAnimatedWebp } from './webp-muxer.js';
@@ -19,8 +20,15 @@ function selectInput(id: string): HTMLSelectElement {
   return element(id, HTMLSelectElement);
 }
 
-const fileInput = numberSafeFileInput('frames');
+function fileInputElement(id: string): HTMLInputElement {
+  const input = element(id, HTMLInputElement);
+  if (input.type !== 'file') throw new Error(`#${id} must be a file input.`);
+  return input;
+}
+
+const fileInput = fileInputElement('frames');
 const runButton = element('run', HTMLButtonElement);
+const cancelButton = element('cancel', HTMLButtonElement);
 const progress = element('progress', HTMLProgressElement);
 const progressText = element('progress-text', HTMLParagraphElement);
 const status = element('status', HTMLParagraphElement);
@@ -29,15 +37,11 @@ const download = element('download', HTMLAnchorElement);
 const results = element('results', HTMLPreElement);
 const preflightStatus = element('preflight-status', HTMLSpanElement);
 const footerResources = element('resource-footer', HTMLDivElement);
+const inferenceWorker = new InferenceWorkerClient();
 
 let preflight: PreflightResult | null = null;
 let resultUrl: string | null = null;
-
-function numberSafeFileInput(id: string): HTMLInputElement {
-  const input = element(id, HTMLInputElement);
-  if (input.type !== 'file') throw new Error(`#${id} must be a file input.`);
-  return input;
-}
+let activeInferenceJobId: string | null = null;
 
 function settings(): RegistrationSettings {
   const axisRaw = selectInput('axis').value;
@@ -74,7 +78,7 @@ function setProgress(update: ProgressUpdate): void {
     : update.stage === 'align'
       ? 'Aligning frames'
       : update.stage === 'interpolate'
-        ? 'Interpolating with RIFE'
+        ? 'Interpolating with RIFE worker'
         : 'Encoding WebP';
   progressText.textContent = `${label} · ${update.current}/${update.total}`;
 }
@@ -110,7 +114,7 @@ function populateFooter(result: PreflightResult): void {
   const benchmarks = document.createElement('span');
   benchmarks.textContent = `Pre-flight: ${benchmarkLabel(result)}`;
   const models = document.createElement('span');
-  models.textContent = 'Browser models: RIFE 4.25 ONNX ready · ResShift/MoG/ToonCrafter component export in progress · ProPainter licence-gated';
+  models.textContent = 'Inference: persistent dedicated worker · RIFE 4.25 ONNX ready · ResShift/MoG/ToonCrafter component export in progress · ProPainter licence-gated';
   footerResources.append(selected, details, benchmarks, models);
 }
 
@@ -148,47 +152,28 @@ async function interpolateRife(
   durations: readonly (number | null)[],
   fallbackDuration: number,
   multiplier: 2 | 4 | 8,
-  activePreflight: PreflightResult,
 ): Promise<InterpolationSequence> {
   if (frames.length < 2) return passthroughSequence(frames, durations);
-  setStatus('Loading verified RIFE 4.25 model locally…');
-  const { RifeOnnxAdapter } = await import('./inference/rife.js');
-  const adapter = await RifeOnnxAdapter.create(activePreflight.profile);
-  const outputFrames: ImageData[] = [];
-  const outputDurations: (number | null)[] = [];
-  const total = (frames.length - 1) * (multiplier - 1);
-  let completed = 0;
-
-  try {
-    for (let pairIndex = 0; pairIndex < frames.length - 1; pairIndex += 1) {
-      const first = frames[pairIndex];
-      const second = frames[pairIndex + 1];
-      if (!first || !second) throw new Error('RIFE frame pair is incomplete.');
-      const sourceDuration = durations[pairIndex] ?? fallbackDuration;
-      const subDuration = Math.max(1, Math.round(sourceDuration / multiplier));
-      outputFrames.push(first);
-      outputDurations.push(subDuration);
-
-      const ratios = Array.from(
-        { length: multiplier - 1 },
-        (_unused, index) => (index + 1) / multiplier,
-      );
-      const middles = await adapter.interpolateMany(first, second, ratios);
-      for (const middle of middles) {
-        outputFrames.push(middle.image);
-        outputDurations.push(subDuration);
-        completed += 1;
-        setProgress({ stage: 'interpolate', current: completed, total });
+  setStatus('Dispatching RIFE 4.25 to the persistent inference worker…');
+  const started = inferenceWorker.interpolateRife(
+    frames,
+    durations,
+    fallbackDuration,
+    multiplier,
+    (workerProgress) => {
+      setProgress({ stage: 'interpolate', current: workerProgress.current, total: workerProgress.total });
+      if (workerProgress.provider !== null) {
+        setStatus(`RIFE worker running via ${workerProgress.provider}${document.hidden ? ' while this tab is hidden' : ''}.`);
       }
-    }
-
-    const lastFrame = frames[frames.length - 1];
-    if (!lastFrame) throw new Error('RIFE final frame is missing.');
-    outputFrames.push(lastFrame);
-    outputDurations.push(durations[durations.length - 1] ?? fallbackDuration);
-    return { frames: outputFrames, durations: outputDurations, provider: adapter.provider };
+    },
+  );
+  activeInferenceJobId = started.jobId;
+  cancelButton.disabled = false;
+  try {
+    return await started.promise;
   } finally {
-    adapter.close();
+    activeInferenceJobId = null;
+    cancelButton.disabled = true;
   }
 }
 
@@ -210,6 +195,23 @@ fileInput.addEventListener('change', () => {
   runButton.disabled = !(fileInput.files?.length) || preflight === null;
 });
 
+cancelButton.addEventListener('click', () => {
+  const jobId = activeInferenceJobId;
+  if (jobId === null) return;
+  cancelButton.disabled = true;
+  setStatus('Cancelling inference after the current model invocation returns…');
+  inferenceWorker.cancel(jobId);
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (activeInferenceJobId === null) return;
+  if (document.hidden) {
+    setStatus('Tab hidden. The dedicated inference worker is continuing the active job.');
+  } else {
+    setStatus('Tab visible again. Inference worker remains active.');
+  }
+});
+
 runButton.addEventListener('click', () => {
   void (async (): Promise<void> => {
     const activePreflight = preflight;
@@ -217,6 +219,7 @@ runButton.addEventListener('click', () => {
     if (!activePreflight || files.length === 0) return;
 
     runButton.disabled = true;
+    cancelButton.disabled = true;
     progress.value = 0;
     setStatus('Processing entirely on this device…');
     const engine = await AdaptiveAlignmentEngine.create(activePreflight.profile, activePreflight.selectedBackend);
@@ -228,13 +231,7 @@ runButton.addEventListener('click', () => {
       const rendered = renderUnionFrames(decoded.frames, registration.positions);
       const duration = Math.max(1, Math.round(Number(numberInput('duration').value) || 100));
       const interpolated = interpolationEngine() === 'rife'
-        ? await interpolateRife(
-          rendered,
-          decoded.sourceDurations,
-          duration,
-          interpolationMultiplier(),
-          activePreflight,
-        )
+        ? await interpolateRife(rendered, decoded.sourceDurations, duration, interpolationMultiplier())
         : passthroughSequence(rendered, decoded.sourceDurations);
       const loop = Math.max(0, Math.round(Number(numberInput('loop').value) || 0));
       const quality = Math.max(0.01, Math.min(1, (Number(numberInput('quality').value) || 95) / 100));
@@ -257,15 +254,22 @@ runButton.addEventListener('click', () => {
         .join('\n');
       const modelReport = interpolated.provider === null
         ? 'Interpolation: disabled'
-        : `Interpolation: RIFE 4.25 ONNX via ${interpolated.provider}`;
+        : `Interpolation: RIFE 4.25 ONNX persistent worker via ${interpolated.provider}`;
       results.textContent = `${modelReport}\n${alignmentReport}`;
       progress.value = 1;
       progressText.textContent = 'Complete';
       setStatus(`Finished locally with ${activePreflight.selectedBackend}.`, 'success');
     } catch (error: unknown) {
-      setStatus(error instanceof Error ? error.message : String(error), 'error');
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        progressText.textContent = 'Cancelled';
+        setStatus('Inference cancelled.', 'neutral');
+      } else {
+        setStatus(error instanceof Error ? error.message : String(error), 'error');
+      }
     } finally {
       engine.close();
+      activeInferenceJobId = null;
+      cancelButton.disabled = true;
       runButton.disabled = false;
     }
   })();
