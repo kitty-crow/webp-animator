@@ -54,7 +54,7 @@ function settings(): RegistrationSettings {
 
 function setStatus(message: string, kind: 'neutral' | 'error' | 'success' = 'neutral'): void {
   status.textContent = message;
-  status.dataset.kind = kind;
+  status.dataset['kind'] = kind;
 }
 
 function setProgress(update: ProgressUpdate): void {
