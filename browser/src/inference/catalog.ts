@@ -14,12 +14,21 @@ export type BrowserModelFamily =
   | 'eden'
   | 'speed';
 
+export interface BrowserExternalDataAsset {
+  readonly id: string;
+  readonly path: string;
+  readonly url: string;
+  readonly sha256: string;
+  readonly bytes: number;
+}
+
 export interface BrowserModelAsset {
   readonly id: string;
   readonly url: string;
   readonly sha256: string;
   readonly bytes: number;
   readonly licence: string;
+  readonly externalData?: readonly BrowserExternalDataAsset[];
 }
 
 export interface BrowserModelComponent {
