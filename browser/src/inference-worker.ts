@@ -11,6 +11,7 @@ import {
   type TransferFrame,
 } from './inference-worker-protocol.js';
 import { interpolateAmtFrames } from './inference/amt-interpolation.js';
+import { generateMidpointAnchors } from './inference/frame-generator.js';
 import { interpolateGenerativeFrames, type GenerativeInterpolationEngine } from './inference/generative-interpolation.js';
 import { RifeOnnxAdapter } from './inference/rife.js';
 import { runPreflight } from './preflight.js';
@@ -20,6 +21,12 @@ import { encodeAnimatedWebp } from './webp-muxer.js';
 interface WorkerScopeLike {
   addEventListener(type: 'message', listener: (event: MessageEvent<unknown>) => void): void;
   postMessage(message: InferenceWorkerResponse, transfer?: Transferable[]): void;
+}
+
+interface RenderSequence {
+  readonly frames: readonly ImageData[];
+  readonly durations: readonly (number | null)[];
+  readonly provider: 'webgpu' | 'wasm' | null;
 }
 
 const scope = globalThis as unknown as WorkerScopeLike;
@@ -53,6 +60,15 @@ function transferFromImage(frame: ImageData): TransferFrame {
 
 function ensureNotCancelled(jobId: string): void {
   if (cancelledJobs.has(jobId)) throw new DOMException('Inference job cancelled.', 'AbortError');
+}
+
+function mergeProvider(
+  current: 'webgpu' | 'wasm' | null,
+  next: 'webgpu' | 'wasm' | null,
+): 'webgpu' | 'wasm' | null {
+  if (next === null) return current;
+  if (current === null) return next;
+  return current === 'wasm' || next === 'wasm' ? 'wasm' : 'webgpu';
 }
 
 async function checkpoint(
@@ -247,13 +263,40 @@ async function interpolateRifeRenderFrames(
   }
 }
 
+async function generateRenderFrames(
+  request: StartRenderRequest,
+  frames: readonly ImageData[],
+  durations: readonly (number | null)[],
+  hardware: Awaited<ReturnType<typeof detectHardware>>,
+  computeBackend: ComputeBackend,
+): Promise<RenderSequence> {
+  if (request.generator === 'none' || frames.length < 2) return { frames, durations, provider: null };
+  const manifestUrl = request.generatorManifestUrl;
+  if (manifestUrl === null) throw new Error(`${request.generator.toUpperCase()} requires a generator manifest URL.`);
+  const total = frames.length - 1;
+  renderProgress(request.jobId, 'generate', 0, total, null, computeBackend, `Loading ${request.generator.toUpperCase()} generator manifest`);
+  return generateMidpointAnchors(
+    request.generator,
+    manifestUrl,
+    frames,
+    durations,
+    request.duration,
+    hardware,
+    (update) => {
+      ensureNotCancelled(request.jobId);
+      renderProgress(request.jobId, 'generate', update.current, update.total, update.provider, computeBackend, update.detail);
+    },
+    () => ensureNotCancelled(request.jobId),
+  );
+}
+
 async function interpolateRenderFrames(
   request: StartRenderRequest,
   frames: readonly ImageData[],
   durations: readonly (number | null)[],
   hardware: Awaited<ReturnType<typeof detectHardware>>,
   computeBackend: ComputeBackend,
-): Promise<{ readonly frames: readonly ImageData[]; readonly durations: readonly (number | null)[]; readonly provider: 'webgpu' | 'wasm' | null }> {
+): Promise<RenderSequence> {
   if (request.interpolation === 'none' || frames.length < 2) return { frames, durations, provider: null };
   if (request.interpolation === 'rife') return interpolateRifeRenderFrames(request, frames, durations, hardware, computeBackend);
   const manifestUrl = request.modelManifestUrl;
@@ -333,15 +376,26 @@ async function runRender(request: StartRenderRequest): Promise<void> {
     const rendered = renderUnionFrames(decoded.frames, registration.positions);
     ensureNotCancelled(request.jobId);
 
-    stage = 'interpolate';
-    const interpolated = await interpolateRenderFrames(
+    stage = 'generate';
+    const generated = await generateRenderFrames(
       request,
       rendered,
       decoded.sourceDurations,
       preflight.profile,
       computeBackend,
     );
-    provider = interpolated.provider;
+    provider = mergeProvider(provider, generated.provider);
+    ensureNotCancelled(request.jobId);
+
+    stage = 'interpolate';
+    const interpolated = await interpolateRenderFrames(
+      request,
+      generated.frames,
+      generated.durations,
+      preflight.profile,
+      computeBackend,
+    );
+    provider = mergeProvider(provider, interpolated.provider);
     ensureNotCancelled(request.jobId);
 
     stage = 'encode';
