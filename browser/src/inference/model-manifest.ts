@@ -2,10 +2,11 @@ import type { AmtAssetBundle, AmtScaleAsset } from './amt.js';
 import type { BrowserExternalDataAsset, BrowserModelAsset } from './catalog.js';
 import type { EdenAssetBundle, SpeedAssetBundle } from './frame-generator.js';
 import type { MogAssetBundle } from './mog.js';
+import type { ProPainterAssetBundle } from './propainter.js';
 import type { ResShiftAssetBundle } from './resshift.js';
 import type { ToonCrafterAssetBundle } from './tooncrafter.js';
 
-export type ManifestBackedFamily = 'amt' | 'resshift' | 'mog' | 'tooncrafter' | 'eden' | 'speed';
+export type ManifestBackedFamily = 'amt' | 'resshift' | 'mog' | 'tooncrafter' | 'eden' | 'speed' | 'propainter';
 
 export type LoadedModelManifest =
   | { readonly family: 'amt'; readonly bundle: AmtAssetBundle }
@@ -13,7 +14,8 @@ export type LoadedModelManifest =
   | { readonly family: 'mog'; readonly bundle: MogAssetBundle }
   | { readonly family: 'tooncrafter'; readonly bundle: ToonCrafterAssetBundle }
   | { readonly family: 'eden'; readonly bundle: EdenAssetBundle }
-  | { readonly family: 'speed'; readonly bundle: SpeedAssetBundle };
+  | { readonly family: 'speed'; readonly bundle: SpeedAssetBundle }
+  | { readonly family: 'propainter'; readonly bundle: ProPainterAssetBundle };
 
 interface ManifestAssetRecord {
   readonly path: string;
@@ -192,6 +194,22 @@ export async function loadModelManifest(
   const components = recordOf(root['components'], 'components');
   const assets = parseAssets(root['assets']);
   const make = (path: string): BrowserModelAsset => assetFor(manifestUrl, assets, path, expectedFamily, source, licence);
+
+  if (expectedFamily === 'propainter') {
+    const windowSize = positiveInteger(root, 'windowSize', 'manifest');
+    const overlap = positiveInteger(root, 'overlap', 'manifest');
+    if (overlap >= windowSize) throw new Error('manifest.overlap must be smaller than manifest.windowSize.');
+    return {
+      family: 'propainter',
+      bundle: {
+        repairWindow: make(componentPath(components, 'repairWindow')),
+        windowSize,
+        internalWidth: positiveInteger(root, 'internalWidth', 'manifest'),
+        internalHeight: positiveInteger(root, 'internalHeight', 'manifest'),
+        overlap,
+      },
+    };
+  }
 
   if (expectedFamily === 'eden') {
     const cosSimStd = finiteNumber(root, 'cosSimStd', 'manifest');
