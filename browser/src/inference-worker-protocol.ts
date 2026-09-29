@@ -1,6 +1,9 @@
 import type { ModelExecutionProvider } from './inference/ort-runtime.js';
+import type { ComputeBackend, RegistrationSettings, ShiftResult } from './types.js';
 
 export type RifeMultiplier = 2 | 4 | 8;
+export type RenderInterpolationEngine = 'none' | 'rife';
+export type RenderProgressStage = 'preflight' | 'decode' | 'align' | 'interpolate' | 'encode';
 
 export interface TransferFrame {
   readonly width: number;
@@ -17,12 +20,24 @@ export interface StartRifeRequest {
   readonly multiplier: RifeMultiplier;
 }
 
+export interface StartRenderRequest {
+  readonly type: 'start-render';
+  readonly jobId: string;
+  readonly files: readonly File[];
+  readonly registration: RegistrationSettings;
+  readonly interpolation: RenderInterpolationEngine;
+  readonly multiplier: RifeMultiplier;
+  readonly duration: number;
+  readonly loop: number;
+  readonly quality: number;
+}
+
 export interface CancelInferenceRequest {
   readonly type: 'cancel';
   readonly jobId: string;
 }
 
-export type InferenceWorkerRequest = StartRifeRequest | CancelInferenceRequest;
+export type InferenceWorkerRequest = StartRifeRequest | StartRenderRequest | CancelInferenceRequest;
 
 export interface InferenceProgressResponse {
   readonly type: 'progress';
@@ -33,12 +48,32 @@ export interface InferenceProgressResponse {
   readonly provider: ModelExecutionProvider | null;
 }
 
+export interface RenderProgressResponse {
+  readonly type: 'render-progress';
+  readonly jobId: string;
+  readonly stage: RenderProgressStage;
+  readonly current: number;
+  readonly total: number;
+  readonly provider: ModelExecutionProvider | null;
+  readonly computeBackend: ComputeBackend | null;
+  readonly detail: string | null;
+}
+
 export interface InferenceCompleteResponse {
   readonly type: 'complete';
   readonly jobId: string;
   readonly frames: readonly TransferFrame[];
   readonly durations: readonly (number | null)[];
   readonly provider: ModelExecutionProvider;
+}
+
+export interface RenderCompleteResponse {
+  readonly type: 'render-complete';
+  readonly jobId: string;
+  readonly webp: ArrayBuffer;
+  readonly provider: ModelExecutionProvider | null;
+  readonly computeBackend: ComputeBackend;
+  readonly pairwise: readonly ShiftResult[];
 }
 
 export interface InferenceCancelledResponse {
@@ -54,7 +89,9 @@ export interface InferenceErrorResponse {
 
 export type InferenceWorkerResponse =
   | InferenceProgressResponse
+  | RenderProgressResponse
   | InferenceCompleteResponse
+  | RenderCompleteResponse
   | InferenceCancelledResponse
   | InferenceErrorResponse;
 
@@ -72,6 +109,12 @@ function stringField(record: Readonly<Record<string, unknown>>, key: string): st
 function numericField(record: Readonly<Record<string, unknown>>, key: string): number {
   const value = record[key];
   if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`Inference worker ${key} must be finite.`);
+  return value;
+}
+
+function nonNegativeInteger(record: Readonly<Record<string, unknown>>, key: string): number {
+  const value = numericField(record, key);
+  if (!Number.isInteger(value) || value < 0) throw new Error(`Inference worker ${key} must be a non-negative integer.`);
   return value;
 }
 
@@ -105,11 +148,59 @@ function parseMultiplier(value: unknown): RifeMultiplier {
   throw new Error('RIFE multiplier must be 2, 4 or 8.');
 }
 
+function parseRegistration(value: unknown): RegistrationSettings {
+  const record = recordOf(value);
+  const axisValue = record['axis'];
+  const axis: RegistrationSettings['axis'] = axisValue === 'x' || axisValue === 'y' || axisValue === 'none' || axisValue === 'xy'
+    ? axisValue
+    : (() => { throw new Error('Registration axis is invalid.'); })();
+  const maxShiftX = numericField(record, 'maxShiftX');
+  const maxShiftY = numericField(record, 'maxShiftY');
+  const sigma = numericField(record, 'sigma');
+  const alphaThreshold = numericField(record, 'alphaThreshold');
+  const proxyMaxSide = numericField(record, 'proxyMaxSide');
+  if (maxShiftX < 0 || maxShiftY < 0) throw new Error('Registration shifts must be non-negative.');
+  if (sigma <= 0 || proxyMaxSide < 1) throw new Error('Registration sigma and proxy size must be positive.');
+  if (!Number.isInteger(alphaThreshold) || alphaThreshold < 0 || alphaThreshold > 255) throw new Error('Registration alpha threshold is invalid.');
+  return { axis, maxShiftX, maxShiftY, sigma, alphaThreshold, proxyMaxSide };
+}
+
+function parseFiles(value: unknown): readonly File[] {
+  if (!Array.isArray(value) || value.length === 0) throw new Error('Render worker requires at least one source file.');
+  return value.map((entry: unknown): File => {
+    if (!(entry instanceof File)) throw new Error('Render worker source must be a File.');
+    return entry;
+  });
+}
+
+function parseRender(record: Readonly<Record<string, unknown>>, jobId: string): StartRenderRequest {
+  const interpolationValue = record['interpolation'];
+  const interpolation: RenderInterpolationEngine = interpolationValue === 'rife' ? 'rife' : interpolationValue === 'none'
+    ? 'none'
+    : (() => { throw new Error('Render interpolation model is invalid.'); })();
+  const duration = numericField(record, 'duration');
+  const quality = numericField(record, 'quality');
+  if (duration <= 0) throw new Error('Render duration must be positive.');
+  if (quality <= 0 || quality > 1) throw new Error('Render quality must be in (0, 1].');
+  return {
+    type: 'start-render',
+    jobId,
+    files: parseFiles(record['files']),
+    registration: parseRegistration(record['registration']),
+    interpolation,
+    multiplier: parseMultiplier(record['multiplier']),
+    duration,
+    loop: nonNegativeInteger(record, 'loop'),
+    quality,
+  };
+}
+
 export function parseInferenceWorkerRequest(value: unknown): InferenceWorkerRequest {
   const record = recordOf(value);
   const type = stringField(record, 'type');
   const jobId = stringField(record, 'jobId');
   if (type === 'cancel') return { type, jobId };
+  if (type === 'start-render') return parseRender(record, jobId);
   if (type !== 'start-rife') throw new Error(`Unsupported inference worker request: ${type}.`);
 
   const rawFrames = record['frames'];
