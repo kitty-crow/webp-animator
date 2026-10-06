@@ -37,6 +37,17 @@ describe('browser model catalogue', () => {
 });
 
 describe('persistent inference worker protocol', () => {
+  test('accepts page visibility updates without a job id', () => {
+    expect(parseInferenceWorkerRequest({ type: 'visibility', hidden: true })).toEqual({
+      type: 'visibility',
+      hidden: true,
+    });
+    expect(parseInferenceWorkerRequest({ type: 'visibility', hidden: false })).toEqual({
+      type: 'visibility',
+      hidden: false,
+    });
+  });
+
   test('accepts a strictly shaped RIFE request', () => {
     const request = parseInferenceWorkerRequest({
       type: 'start-rife',
