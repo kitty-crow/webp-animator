@@ -44,7 +44,16 @@ export interface CancelInferenceRequest {
   readonly jobId: string;
 }
 
-export type InferenceWorkerRequest = StartRifeRequest | StartRenderRequest | CancelInferenceRequest;
+export interface VisibilityInferenceRequest {
+  readonly type: 'visibility';
+  readonly hidden: boolean;
+}
+
+export type InferenceWorkerRequest =
+  | StartRifeRequest
+  | StartRenderRequest
+  | CancelInferenceRequest
+  | VisibilityInferenceRequest;
 
 export interface InferenceProgressResponse {
   readonly type: 'progress';
@@ -260,6 +269,11 @@ function parseRender(record: Readonly<Record<string, unknown>>, jobId: string): 
 export function parseInferenceWorkerRequest(value: unknown): InferenceWorkerRequest {
   const record = recordOf(value);
   const type = stringField(record, 'type');
+  if (type === 'visibility') {
+    const hidden = record['hidden'];
+    if (typeof hidden !== 'boolean') throw new Error('Inference worker visibility state must be boolean.');
+    return { type, hidden };
+  }
   const jobId = stringField(record, 'jobId');
   if (type === 'cancel') return { type, jobId };
   if (type === 'start-render') return parseRender(record, jobId);
