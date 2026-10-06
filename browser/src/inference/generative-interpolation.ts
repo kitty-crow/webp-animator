@@ -150,7 +150,12 @@ export async function interpolateGenerativeFrames(
   if (frames.length < 2) throw new Error(`${engine} interpolation requires at least two frames.`);
   if (durations.length !== frames.length) throw new Error('Generative frame and duration counts differ.');
   const manifest = await loadModelManifest(manifestUrl, modelFamily(engine));
-  if (manifest.family === 'amt' || manifest.family === 'eden' || manifest.family === 'speed') {
+  if (
+    manifest.family === 'amt' ||
+    manifest.family === 'eden' ||
+    manifest.family === 'speed' ||
+    manifest.family === 'propainter'
+  ) {
     throw new Error(`${manifest.family} manifest cannot be used by the generative interpolation path.`);
   }
   const total = (frames.length - 1) * (multiplier - 1);
