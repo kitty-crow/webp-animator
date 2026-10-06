@@ -218,6 +218,7 @@ def main() -> None:
         "format": 1,
         "family": "resshift",
         "source": "VicFonch/Multi-Input-Resshift-Diffusion-VFI",
+        "licence": "MIT",
         "components": {
             "flow": "flow.onnx",
             "extractor": "extractor.onnx",
