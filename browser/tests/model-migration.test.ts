@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import { parseInferenceWorkerRequest } from '../src/inference-worker-protocol.js';
-import { BROWSER_MODEL_CATALOG, browserModelDefinition } from '../src/inference/catalog.js';
+import { BROWSER_MODEL_CATALOG, browserHostedManifestUrl, browserModelDefinition } from '../src/inference/catalog.js';
 import { ddimStep, makeLegacyLdmUniformDdimSchedule, makeUniformDdimSchedule } from '../src/inference/ddim.js';
 import { DEFAULT_MOG_SCHEDULE, makeMogDdimSchedule, mogDdimStep, mogDynamicScale, mogTimesteps, mogVPrediction } from '../src/inference/mog-scheduler.js';
 import { dilatePlane } from '../src/inference/propainter-mask.js';
@@ -27,6 +27,13 @@ describe('browser model catalogue', () => {
       expect(definition.fallbackProvider).toBe('wasm');
       expect(definition.components.length).toBeGreaterThan(0);
     }
+  });
+
+  test('AMT-S has a ready hosted browser manifest', () => {
+    expect(browserModelDefinition('amt').status).toBe('adapter-ready');
+    expect(browserHostedManifestUrl('amt')).toBe(
+      'https://github.com/kitty-crow/webp-animator/releases/download/browser-amt-v1/manifest.json',
+    );
   });
 
   test('RIFE 4.25 browser asset is pinned and integrity checked', () => {
