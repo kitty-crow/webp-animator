@@ -33,6 +33,18 @@ interface RenderSequence {
 const scope = globalThis as unknown as WorkerScopeLike;
 const cancelledJobs = new Set<string>();
 let activeJobId: string | null = null;
+let pageHidden = false;
+const visibilityWaiters = new Set<() => void>();
+
+function wakeVisibilityWaiters(): void {
+  for (const resolve of visibilityWaiters) resolve();
+  visibilityWaiters.clear();
+}
+
+function setPageHidden(hidden: boolean): void {
+  pageHidden = hidden;
+  if (!hidden) wakeVisibilityWaiters();
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -61,6 +73,34 @@ function transferFromImage(frame: ImageData): TransferFrame {
 
 function ensureNotCancelled(jobId: string): void {
   if (cancelledJobs.has(jobId)) throw new DOMException('Inference job cancelled.', 'AbortError');
+}
+
+async function waitUntilVisible(jobId: string): Promise<void> {
+  while (pageHidden) {
+    ensureNotCancelled(jobId);
+    await new Promise<void>((resolve) => visibilityWaiters.add(resolve));
+  }
+  ensureNotCancelled(jobId);
+}
+
+async function withHiddenTabRecovery<T>(
+  jobId: string,
+  operation: () => Promise<T>,
+  onPause: (message: string) => void,
+  onResume?: () => void | Promise<void>,
+): Promise<T> {
+  while (true) {
+    ensureNotCancelled(jobId);
+    try {
+      return await operation();
+    } catch (error: unknown) {
+      if (error instanceof DOMException && error.name === 'AbortError') throw error;
+      if (!pageHidden) throw error;
+      onPause(errorMessage(error));
+      await waitUntilVisible(jobId);
+      if (onResume) await onResume();
+    }
+  }
 }
 
 function mergeProvider(
@@ -144,7 +184,11 @@ async function runRife(request: StartRifeRequest): Promise<void> {
 
     const hardware = await detectHardware();
     ensureNotCancelled(request.jobId);
-    adapter = await RifeOnnxAdapter.create(hardware);
+    adapter = await withHiddenTabRecovery(
+      request.jobId,
+      () => RifeOnnxAdapter.create(hardware),
+      () => progress(request.jobId, 'initialising', current, total, provider),
+    );
     provider = adapter.provider;
     await checkpoint(request.jobId, 'rife', 'running', 'interpolate', current, total, provider, null);
     progress(request.jobId, 'interpolating', current, total, provider);
@@ -180,7 +224,19 @@ async function runRife(request: StartRifeRequest): Promise<void> {
       for (let ordinal = 1; ordinal < request.multiplier; ordinal += 1) {
         ensureNotCancelled(request.jobId);
         const ratio = ordinal / request.multiplier;
-        const result = await adapter.interpolate(first, second, ratio);
+        const result = await withHiddenTabRecovery(
+          request.jobId,
+          () => {
+            if (!adapter) throw new Error('RIFE adapter is unavailable.');
+            return adapter.interpolate(first, second, ratio);
+          },
+          () => progress(request.jobId, 'interpolating', current, total, provider),
+          async () => {
+            adapter?.close();
+            adapter = await RifeOnnxAdapter.create(hardware);
+            provider = adapter.provider;
+          },
+        );
         outputFrames.push(result.image);
         outputDurations.push(subDuration);
         current += 1;
@@ -388,77 +444,171 @@ async function runRender(request: StartRenderRequest): Promise<void> {
   try {
     if (typeof OffscreenCanvas !== 'function') throw new Error('Persistent background rendering requires OffscreenCanvas in this browser.');
     renderProgress(request.jobId, 'preflight', 0, 1, provider, computeBackend, 'Benchmarking worker-local compute backends');
-    const preflight = await runPreflight();
+    const preflight = await withHiddenTabRecovery(
+      request.jobId,
+      () => runPreflight(),
+      (message) => renderProgress(
+        request.jobId,
+        'preflight',
+        0,
+        1,
+        provider,
+        computeBackend,
+        `Browser paused background compute while hidden (${message}). Waiting for visibility…`,
+      ),
+      () => renderProgress(request.jobId, 'preflight', 0, 1, provider, computeBackend, 'Tab visible again; retrying pre-flight'),
+    );
     computeBackend = preflight.selectedBackend;
     ensureNotCancelled(request.jobId);
     renderProgress(request.jobId, 'preflight', 1, 1, provider, computeBackend, `Selected ${computeBackend}`);
 
     stage = 'decode';
-    const decoded = await decodeInputFiles(request.files, (update: ProgressUpdate) => {
-      if (update.stage !== 'decode') return;
-      ensureNotCancelled(request.jobId);
-      current = update.current;
-      total = update.total;
-      renderProgress(request.jobId, 'decode', update.current, update.total, provider, computeBackend, update.fileName);
-    });
+    const decoded = await withHiddenTabRecovery(
+      request.jobId,
+      () => decodeInputFiles(request.files, (update: ProgressUpdate) => {
+        if (update.stage !== 'decode') return;
+        ensureNotCancelled(request.jobId);
+        current = update.current;
+        total = update.total;
+        renderProgress(request.jobId, 'decode', update.current, update.total, provider, computeBackend, update.fileName);
+      }),
+      (message) => renderProgress(
+        request.jobId,
+        'decode',
+        current,
+        total,
+        provider,
+        computeBackend,
+        `Browser paused background decoding while hidden (${message}). Waiting for visibility…`,
+      ),
+      () => renderProgress(request.jobId, 'decode', current, total, provider, computeBackend, 'Tab visible again; retrying decode'),
+    );
     ensureNotCancelled(request.jobId);
 
     stage = 'align';
-    engine = await AdaptiveAlignmentEngine.create(preflight.profile, computeBackend);
-    const registration = await engine.registerSequence(decoded.frames, request.registration, (completed, count) => {
-      ensureNotCancelled(request.jobId);
-      current = completed;
-      total = count;
-      renderProgress(request.jobId, 'align', completed, count, provider, computeBackend);
-    });
+    const registration = await withHiddenTabRecovery(
+      request.jobId,
+      async () => {
+        engine?.close();
+        engine = await AdaptiveAlignmentEngine.create(preflight.profile, computeBackend);
+        return engine.registerSequence(decoded.frames, request.registration, (completed, count) => {
+          ensureNotCancelled(request.jobId);
+          current = completed;
+          total = count;
+          renderProgress(request.jobId, 'align', completed, count, provider, computeBackend);
+        });
+      },
+      (message) => renderProgress(
+        request.jobId,
+        'align',
+        current,
+        total,
+        provider,
+        computeBackend,
+        `Browser paused background alignment while hidden (${message}). Waiting for visibility…`,
+      ),
+      () => renderProgress(request.jobId, 'align', current, total, provider, computeBackend, 'Tab visible again; retrying alignment'),
+    );
     const rendered = renderUnionFrames(decoded.frames, registration.positions);
     ensureNotCancelled(request.jobId);
 
     stage = 'generate';
-    const generated = await generateRenderFrames(
-      request,
-      rendered,
-      decoded.sourceDurations,
-      preflight.profile,
-      computeBackend,
+    const generated = await withHiddenTabRecovery(
+      request.jobId,
+      () => generateRenderFrames(
+        request,
+        rendered,
+        decoded.sourceDurations,
+        preflight.profile,
+        computeBackend,
+      ),
+      (message) => renderProgress(
+        request.jobId,
+        'generate',
+        current,
+        total,
+        provider,
+        computeBackend,
+        `Browser paused background generation while hidden (${message}). Waiting for visibility…`,
+      ),
+      () => renderProgress(request.jobId, 'generate', current, total, provider, computeBackend, 'Tab visible again; retrying generation'),
     );
     provider = mergeProvider(provider, generated.provider);
     ensureNotCancelled(request.jobId);
 
     stage = 'interpolate';
-    const interpolated = await interpolateRenderFrames(
-      request,
-      generated.frames,
-      generated.durations,
-      preflight.profile,
-      computeBackend,
+    const interpolated = await withHiddenTabRecovery(
+      request.jobId,
+      () => interpolateRenderFrames(
+        request,
+        generated.frames,
+        generated.durations,
+        preflight.profile,
+        computeBackend,
+      ),
+      (message) => renderProgress(
+        request.jobId,
+        'interpolate',
+        current,
+        total,
+        provider,
+        computeBackend,
+        `Browser paused background interpolation while hidden (${message}). Waiting for visibility…`,
+      ),
+      () => renderProgress(request.jobId, 'interpolate', current, total, provider, computeBackend, 'Tab visible again; retrying interpolation'),
     );
     provider = mergeProvider(provider, interpolated.provider);
     ensureNotCancelled(request.jobId);
 
     stage = 'repair';
-    const repaired = await repairRenderFrames(
-      request,
-      interpolated.frames,
-      interpolated.durations,
-      preflight.profile,
-      computeBackend,
+    const repaired = await withHiddenTabRecovery(
+      request.jobId,
+      () => repairRenderFrames(
+        request,
+        interpolated.frames,
+        interpolated.durations,
+        preflight.profile,
+        computeBackend,
+      ),
+      (message) => renderProgress(
+        request.jobId,
+        'repair',
+        current,
+        total,
+        provider,
+        computeBackend,
+        `Browser paused background repair while hidden (${message}). Waiting for visibility…`,
+      ),
+      () => renderProgress(request.jobId, 'repair', current, total, provider, computeBackend, 'Tab visible again; retrying repair'),
     );
     provider = mergeProvider(provider, repaired.provider);
     ensureNotCancelled(request.jobId);
 
     stage = 'encode';
-    const blob = await encodeAnimatedWebp(repaired.frames, {
-      duration: request.duration,
-      durations: repaired.durations,
-      loop: request.loop,
-      quality: request.quality,
-    }, (completed, count) => {
-      ensureNotCancelled(request.jobId);
-      current = completed;
-      total = count;
-      renderProgress(request.jobId, 'encode', completed, count, provider, computeBackend);
-    });
+    const blob = await withHiddenTabRecovery(
+      request.jobId,
+      () => encodeAnimatedWebp(repaired.frames, {
+        duration: request.duration,
+        durations: repaired.durations,
+        loop: request.loop,
+        quality: request.quality,
+      }, (completed, count) => {
+        ensureNotCancelled(request.jobId);
+        current = completed;
+        total = count;
+        renderProgress(request.jobId, 'encode', completed, count, provider, computeBackend);
+      }),
+      (message) => renderProgress(
+        request.jobId,
+        'encode',
+        current,
+        total,
+        provider,
+        computeBackend,
+        `Browser paused background encoding while hidden (${message}). Waiting for visibility…`,
+      ),
+      () => renderProgress(request.jobId, 'encode', current, total, provider, computeBackend, 'Tab visible again; retrying encode'),
+    );
     const webp = await blob.arrayBuffer();
     await checkpoint(request.jobId, 'pipeline', 'completed', 'encode', total, total, provider, null);
     scope.postMessage({
@@ -491,9 +641,14 @@ scope.addEventListener('message', (event: MessageEvent<unknown>) => {
     let jobId = 'unknown';
     try {
       const request = parseInferenceWorkerRequest(event.data);
+      if (request.type === 'visibility') {
+        setPageHidden(request.hidden);
+        return;
+      }
       jobId = request.jobId;
       if (request.type === 'cancel') {
         cancelledJobs.add(request.jobId);
+        wakeVisibilityWaiters();
         if (activeJobId !== request.jobId) scope.postMessage({ type: 'cancelled', jobId: request.jobId });
         return;
       }
