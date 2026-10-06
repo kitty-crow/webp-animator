@@ -16,6 +16,19 @@ interface RgbPlaneSource {
   readonly data: Uint8ClampedArray;
 }
 
+interface RifeTensorResult {
+  readonly data: Float32Array;
+  readonly width: number;
+  readonly height: number;
+}
+
+const RIFE_PADDING_MULTIPLE = 128;
+
+export function rifePaddedDimension(value: number): number {
+  if (!Number.isInteger(value) || value <= 0) throw new Error('RIFE dimensions must be positive integers.');
+  return Math.ceil(value / RIFE_PADDING_MULTIPLE) * RIFE_PADDING_MULTIPLE;
+}
+
 function requireAsset() {
   const definition = browserModelDefinition('rife');
   const asset = definition.assets[0];
@@ -39,43 +52,64 @@ function bothOpaque(first: ImageData, second: ImageData): boolean {
 function fillRgbPlanes(
   target: Float32Array,
   targetChannelOffset: number,
+  planeWidth: number,
+  planeHeight: number,
   source: RgbPlaneSource,
 ): void {
-  const pixels = source.width * source.height;
-  for (let index = 0; index < pixels; index += 1) {
-    const sourceOffset = index * 4;
-    target[targetChannelOffset + index] = (source.data[sourceOffset] ?? 0) / 255;
-    target[targetChannelOffset + pixels + index] = (source.data[sourceOffset + 1] ?? 0) / 255;
-    target[targetChannelOffset + pixels * 2 + index] = (source.data[sourceOffset + 2] ?? 0) / 255;
+  if (source.width > planeWidth || source.height > planeHeight) throw new Error('RIFE padded RGB plane is smaller than its source.');
+  const planePixels = planeWidth * planeHeight;
+  for (let y = 0; y < source.height; y += 1) {
+    for (let x = 0; x < source.width; x += 1) {
+      const sourceIndex = y * source.width + x;
+      const sourceOffset = sourceIndex * 4;
+      const targetIndex = y * planeWidth + x;
+      target[targetChannelOffset + targetIndex] = (source.data[sourceOffset] ?? 0) / 255;
+      target[targetChannelOffset + planePixels + targetIndex] = (source.data[sourceOffset + 1] ?? 0) / 255;
+      target[targetChannelOffset + planePixels * 2 + targetIndex] = (source.data[sourceOffset + 2] ?? 0) / 255;
+    }
   }
 }
 
 function fillAlphaAsRgbPlanes(
   target: Float32Array,
   targetChannelOffset: number,
+  planeWidth: number,
+  planeHeight: number,
   source: ImageData,
 ): void {
-  const pixels = source.width * source.height;
-  for (let index = 0; index < pixels; index += 1) {
-    const alpha = (source.data[index * 4 + 3] ?? 0) / 255;
-    target[targetChannelOffset + index] = alpha;
-    target[targetChannelOffset + pixels + index] = alpha;
-    target[targetChannelOffset + pixels * 2 + index] = alpha;
+  if (source.width > planeWidth || source.height > planeHeight) throw new Error('RIFE padded alpha plane is smaller than its source.');
+  const planePixels = planeWidth * planeHeight;
+  for (let y = 0; y < source.height; y += 1) {
+    for (let x = 0; x < source.width; x += 1) {
+      const sourceIndex = y * source.width + x;
+      const targetIndex = y * planeWidth + x;
+      const alpha = (source.data[sourceIndex * 4 + 3] ?? 0) / 255;
+      target[targetChannelOffset + targetIndex] = alpha;
+      target[targetChannelOffset + planePixels + targetIndex] = alpha;
+      target[targetChannelOffset + planePixels * 2 + targetIndex] = alpha;
+    }
   }
 }
 
-function buildInput(first: ImageData, second: ImageData, ratio: number, alpha: boolean): Float32Array {
-  const pixels = first.width * first.height;
+function buildInput(
+  first: ImageData,
+  second: ImageData,
+  ratio: number,
+  alpha: boolean,
+): { readonly data: Float32Array; readonly width: number; readonly height: number } {
+  const width = rifePaddedDimension(first.width);
+  const height = rifePaddedDimension(first.height);
+  const pixels = width * height;
   const input = new Float32Array(pixels * 7);
   if (alpha) {
-    fillAlphaAsRgbPlanes(input, 0, first);
-    fillAlphaAsRgbPlanes(input, pixels * 3, second);
+    fillAlphaAsRgbPlanes(input, 0, width, height, first);
+    fillAlphaAsRgbPlanes(input, pixels * 3, width, height, second);
   } else {
-    fillRgbPlanes(input, 0, first);
-    fillRgbPlanes(input, pixels * 3, second);
+    fillRgbPlanes(input, 0, width, height, first);
+    fillRgbPlanes(input, pixels * 3, width, height, second);
   }
   input.fill(ratio, pixels * 6, pixels * 7);
-  return input;
+  return { data: input, width, height };
 }
 
 function outputTensor(
@@ -88,24 +122,31 @@ function outputTensor(
 }
 
 function outputToImage(
-  rgb: Float32Array,
-  alpha: Float32Array | null,
+  rgb: RifeTensorResult,
+  alpha: RifeTensorResult | null,
   width: number,
   height: number,
 ): ImageData {
-  const pixels = width * height;
-  if (rgb.length < pixels * 3) throw new Error('RIFE RGB output is smaller than expected.');
-  if (alpha !== null && alpha.length < pixels) throw new Error('RIFE alpha output is smaller than expected.');
+  const paddedPixels = rgb.width * rgb.height;
+  if (rgb.data.length < paddedPixels * 3) throw new Error('RIFE RGB output is smaller than expected.');
+  if (alpha !== null) {
+    if (alpha.width !== rgb.width || alpha.height !== rgb.height) throw new Error('RIFE alpha output dimensions differ from RGB.');
+    if (alpha.data.length < paddedPixels) throw new Error('RIFE alpha output is smaller than expected.');
+  }
 
-  const rgba = new Uint8ClampedArray(pixels * 4);
-  for (let index = 0; index < pixels; index += 1) {
-    const offset = index * 4;
-    rgba[offset] = Math.round(Math.max(0, Math.min(1, rgb[index] ?? 0)) * 255);
-    rgba[offset + 1] = Math.round(Math.max(0, Math.min(1, rgb[pixels + index] ?? 0)) * 255);
-    rgba[offset + 2] = Math.round(Math.max(0, Math.min(1, rgb[pixels * 2 + index] ?? 0)) * 255);
-    rgba[offset + 3] = alpha === null
-      ? 255
-      : Math.round(Math.max(0, Math.min(1, alpha[index] ?? 0)) * 255);
+  const rgba = new Uint8ClampedArray(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const sourceIndex = y * rgb.width + x;
+      const targetIndex = y * width + x;
+      const offset = targetIndex * 4;
+      rgba[offset] = Math.round(Math.max(0, Math.min(1, rgb.data[sourceIndex] ?? 0)) * 255);
+      rgba[offset + 1] = Math.round(Math.max(0, Math.min(1, rgb.data[paddedPixels + sourceIndex] ?? 0)) * 255);
+      rgba[offset + 2] = Math.round(Math.max(0, Math.min(1, rgb.data[paddedPixels * 2 + sourceIndex] ?? 0)) * 255);
+      rgba[offset + 3] = alpha === null
+        ? 255
+        : Math.round(Math.max(0, Math.min(1, alpha.data[sourceIndex] ?? 0)) * 255);
+    }
   }
   return new ImageData(rgba, width, height);
 }
@@ -129,19 +170,21 @@ export class RifeOnnxAdapter {
     readonly provider: ModelExecutionProvider,
   ) {}
 
-  private async infer(first: ImageData, second: ImageData, ratio: number, alpha: boolean): Promise<Float32Array> {
+  private async infer(first: ImageData, second: ImageData, ratio: number, alpha: boolean): Promise<RifeTensorResult> {
     const inputName = this.session.inputNames[0];
     const outputName = this.session.outputNames[0];
     if (!inputName || !outputName) throw new Error('RIFE ONNX model has invalid input/output metadata.');
 
+    const input = buildInput(first, second, ratio, alpha);
     const feeds: Record<string, ort.Tensor> = {
-      [inputName]: floatTensor(
-        buildInput(first, second, ratio, alpha),
-        [1, 7, first.height, first.width],
-      ),
+      [inputName]: floatTensor(input.data, [1, 7, input.height, input.width]),
     };
     const outputs = await this.session.run(feeds);
-    return tensorFloatData(outputTensor(outputs, outputName)).slice();
+    return {
+      data: tensorFloatData(outputTensor(outputs, outputName)).slice(),
+      width: input.width,
+      height: input.height,
+    };
   }
 
   async interpolate(first: ImageData, second: ImageData, ratio: number): Promise<RifeInterpolationResult> {
