@@ -6,6 +6,7 @@ on:
     paths:
       - '.github/workflows/browser-model-assets.yml'
       - 'browser/export/export_amt.py'
+      - 'browser/export/export_resshift.py'
   workflow_dispatch:
 
 permissions:
@@ -86,3 +87,86 @@ jobs:
               --notes "Browser-ready ONNX export of MCG-NKU/AMT AMT-S. Upstream licence: CC BY-NC 4.0. Generated from the official source and checkpoint by browser/export/export_amt.py."
           fi
           gh release upload "$tag" /tmp/browser-amt-v1/* --clobber
+
+  resshift:
+    name: Export ResShift
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout WebP Animator
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install export dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            torch==2.6.0 \
+            torchvision==0.21.0 \
+            --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install \
+            onnx==1.17.0 \
+            huggingface-hub==0.30.2 \
+            safetensors>=0.4.5 \
+            kornia==0.8.0 \
+            einops==0.8.0 \
+            cupy-cuda12x>=13.0
+
+      - name: Fetch official ResShift source and checkpoint
+        run: |
+          git clone --depth 1 https://github.com/VicFonch/Multi-Input-Resshift-Diffusion-VFI.git /tmp/ResShift
+          python - <<'PY'
+          from huggingface_hub import snapshot_download
+          snapshot_download(
+              repo_id='vfontech/Multiple-Input-Resshift-VFI',
+              local_dir='/tmp/ResShift-model',
+          )
+          PY
+          git -C /tmp/ResShift rev-parse HEAD
+          sha256sum /tmp/ResShift-model/model.safetensors
+
+      - name: Export ResShift browser graphs
+        run: |
+          rm -rf /tmp/browser-resshift-v1
+          python browser/export/export_resshift.py \
+            --source /tmp/ResShift \
+            --model-dir /tmp/ResShift-model \
+            --output /tmp/browser-resshift-v1
+
+      - name: Include upstream licence
+        run: cp /tmp/ResShift/LICENSE /tmp/browser-resshift-v1/LICENSE-RESSHIFT.txt
+
+      - name: Verify model package
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path('/tmp/browser-resshift-v1')
+          manifest = json.loads((root / 'manifest.json').read_text())
+          assert manifest['family'] == 'resshift'
+          assert manifest['licence'] == 'MIT'
+          assert set(manifest['components']) == {'flow', 'extractor', 'synthesis'}
+          for asset in manifest['assets']:
+              path = root / asset['path']
+              assert path.is_file(), path
+              assert path.stat().st_size == asset['bytes'], path
+          print('ResShift browser package verified')
+          PY
+
+      - name: Publish ResShift browser model release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=browser-resshift-v1
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              --target "$GITHUB_SHA" \
+              --title "Browser ResShift v1" \
+              --notes "Browser-ready ONNX export of VicFonch/Multi-Input-Resshift-Diffusion-VFI. Upstream licence: MIT. Generated from the official Hugging Face checkpoint by browser/export/export_resshift.py."
+          fi
+          gh release upload "$tag" /tmp/browser-resshift-v1/* --clobber
