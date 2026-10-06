@@ -138,6 +138,7 @@ export class InferenceWorkerClient {
       for (const pending of this.pending.values()) pending.reject(new Error(message));
       this.pending.clear();
     });
+    if (typeof document !== 'undefined') this.setPageHidden(document.hidden);
   }
 
   private handleMessage(value: unknown): void {
@@ -306,6 +307,11 @@ export class InferenceWorkerClient {
       this.worker.postMessage(request);
     });
     return { jobId: id, promise };
+  }
+
+  setPageHidden(hidden: boolean): void {
+    const request: InferenceWorkerRequest = { type: 'visibility', hidden };
+    this.worker.postMessage(request);
   }
 
   cancel(jobIdValue: string): void {
