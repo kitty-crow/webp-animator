@@ -116,6 +116,7 @@ jobs:
             kornia==0.8.0 \
             einops==0.8.0 \
             matplotlib>=3.8 \
+            scipy>=1.15 \
             cupy-cuda12x>=13.0
 
       - name: Fetch official ResShift source and checkpoint
@@ -198,7 +199,8 @@ jobs:
             PyYAML==6.0.2 \
             einops==0.7.0 \
             lpips==0.1.4 \
-            opencv-python-headless==4.10.0.84
+            opencv-python-headless==4.10.0.84 \
+            cupy-cuda12x>=13.0
 
       - name: Fetch official EDEN source and checkpoint
         run: |
