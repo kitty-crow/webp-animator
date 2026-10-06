@@ -5,6 +5,7 @@ import { BROWSER_MODEL_CATALOG, browserModelDefinition } from '../src/inference/
 import { ddimStep, makeLegacyLdmUniformDdimSchedule, makeUniformDdimSchedule } from '../src/inference/ddim.js';
 import { DEFAULT_MOG_SCHEDULE, makeMogDdimSchedule, mogDdimStep, mogDynamicScale, mogTimesteps, mogVPrediction } from '../src/inference/mog-scheduler.js';
 import { dilatePlane } from '../src/inference/propainter-mask.js';
+import { rifePaddedDimension } from '../src/inference/rife.js';
 import { initialiseResShiftSample, makeResShiftSchedule, resShiftReverseStep } from '../src/inference/resshift-scheduler.js';
 
 describe('browser ONNX runtime loading', () => {
@@ -43,6 +44,16 @@ describe('browser model catalogue', () => {
 
   test('ProPainter remains explicitly licence-gated', () => {
     expect(browserModelDefinition('propainter').status).toBe('licence-gated');
+  });
+});
+
+describe('RIFE browser preprocessing', () => {
+  test('pads arbitrary frame sizes to the native scale-1 model multiple', () => {
+    expect(rifePaddedDimension(1)).toBe(128);
+    expect(rifePaddedDimension(128)).toBe(128);
+    expect(rifePaddedDimension(129)).toBe(256);
+    expect(rifePaddedDimension(1080)).toBe(1152);
+    expect(rifePaddedDimension(1920)).toBe(1920);
   });
 });
 
