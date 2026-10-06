@@ -45,6 +45,7 @@ export interface BrowserModelDefinition {
   readonly fallbackProvider: 'wasm';
   readonly assets: readonly BrowserModelAsset[];
   readonly components: readonly BrowserModelComponent[];
+  readonly hostedManifestUrl?: string;
   readonly notes: string;
 }
 
@@ -72,7 +73,7 @@ export const BROWSER_MODEL_CATALOG: readonly BrowserModelDefinition[] = [
   {
     family: 'amt',
     label: 'AMT-S',
-    status: 'adapter-ready-assets-required',
+    status: 'adapter-ready',
     preferredProvider: 'webgpu',
     fallbackProvider: 'wasm',
     assets: [],
@@ -82,7 +83,8 @@ export const BROWSER_MODEL_CATALOG: readonly BrowserModelDefinition[] = [
       { id: 'scale050', purpose: '0.5× low-memory interpolation fallback', exportFormat: 'onnx' },
       { id: 'scale025', purpose: '0.25× low-memory interpolation fallback', exportFormat: 'onnx' },
     ],
-    notes: 'The browser exporter emits the same four internal scale factors used by the native low-VRAM worker. The UI consumes a manifest containing hashes, sizes and external-data shard locations. Upstream AMT is CC-BY-NC-4.0.',
+    hostedManifestUrl: 'https://github.com/kitty-crow/webp-animator/releases/download/browser-amt-v1/manifest.json',
+    notes: 'The browser exporter emits the same four internal scale factors used by the native low-VRAM worker. The hosted browser package is generated from the official AMT-S checkpoint and retains its CC-BY-NC-4.0 terms.',
   },
   {
     family: 'resshift',
@@ -170,4 +172,8 @@ export function browserModelDefinition(family: BrowserModelFamily): BrowserModel
   const definition = BROWSER_MODEL_CATALOG.find((candidate) => candidate.family === family);
   if (!definition) throw new Error(`Unknown browser model family: ${family}`);
   return definition;
+}
+
+export function browserHostedManifestUrl(family: BrowserModelFamily): string | null {
+  return browserModelDefinition(family).hostedManifestUrl ?? null;
 }
