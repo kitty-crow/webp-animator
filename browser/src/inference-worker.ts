@@ -439,7 +439,6 @@ async function runRender(request: StartRenderRequest): Promise<void> {
   let total = 1;
   let provider: 'webgpu' | 'wasm' | null = null;
   let computeBackend: ComputeBackend | null = null;
-  let engine: AdaptiveAlignmentEngine | null = null;
 
   try {
     if (typeof OffscreenCanvas !== 'function') throw new Error('Persistent background rendering requires OffscreenCanvas in this browser.');
@@ -458,9 +457,10 @@ async function runRender(request: StartRenderRequest): Promise<void> {
       ),
       () => renderProgress(request.jobId, 'preflight', 0, 1, provider, computeBackend, 'Tab visible again; retrying pre-flight'),
     );
-    computeBackend = preflight.selectedBackend;
+    const selectedBackend = preflight.selectedBackend;
+    computeBackend = selectedBackend;
     ensureNotCancelled(request.jobId);
-    renderProgress(request.jobId, 'preflight', 1, 1, provider, computeBackend, `Selected ${computeBackend}`);
+    renderProgress(request.jobId, 'preflight', 1, 1, provider, selectedBackend, `Selected ${selectedBackend}`);
 
     stage = 'decode';
     const decoded = await withHiddenTabRecovery(
@@ -489,14 +489,17 @@ async function runRender(request: StartRenderRequest): Promise<void> {
     const registration = await withHiddenTabRecovery(
       request.jobId,
       async () => {
-        engine?.close();
-        engine = await AdaptiveAlignmentEngine.create(preflight.profile, computeBackend);
-        return engine.registerSequence(decoded.frames, request.registration, (completed, count) => {
-          ensureNotCancelled(request.jobId);
-          current = completed;
-          total = count;
-          renderProgress(request.jobId, 'align', completed, count, provider, computeBackend);
-        });
+        const alignmentEngine = await AdaptiveAlignmentEngine.create(preflight.profile, selectedBackend);
+        try {
+          return await alignmentEngine.registerSequence(decoded.frames, request.registration, (completed, count) => {
+            ensureNotCancelled(request.jobId);
+            current = completed;
+            total = count;
+            renderProgress(request.jobId, 'align', completed, count, provider, selectedBackend);
+          });
+        } finally {
+          alignmentEngine.close();
+        }
       },
       (message) => renderProgress(
         request.jobId,
@@ -520,7 +523,7 @@ async function runRender(request: StartRenderRequest): Promise<void> {
         rendered,
         decoded.sourceDurations,
         preflight.profile,
-        computeBackend,
+        selectedBackend,
       ),
       (message) => renderProgress(
         request.jobId,
@@ -544,7 +547,7 @@ async function runRender(request: StartRenderRequest): Promise<void> {
         generated.frames,
         generated.durations,
         preflight.profile,
-        computeBackend,
+        selectedBackend,
       ),
       (message) => renderProgress(
         request.jobId,
@@ -568,7 +571,7 @@ async function runRender(request: StartRenderRequest): Promise<void> {
         interpolated.frames,
         interpolated.durations,
         preflight.profile,
-        computeBackend,
+        selectedBackend,
       ),
       (message) => renderProgress(
         request.jobId,
@@ -630,7 +633,6 @@ async function runRender(request: StartRenderRequest): Promise<void> {
       scope.postMessage({ type: 'error', jobId: request.jobId, message });
     }
   } finally {
-    engine?.close();
     cancelledJobs.delete(request.jobId);
     activeJobId = null;
   }
