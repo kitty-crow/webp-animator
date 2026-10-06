@@ -1,4 +1,4 @@
-import * as ort from 'onnxruntime-web/webgpu';
+import type * as ort from 'onnxruntime-web/webgpu';
 
 import type { HardwareProfile } from '../types.js';
 import type { BrowserModelAsset } from './catalog.js';
@@ -12,15 +12,34 @@ export interface LoadedOrtModel {
   readonly asset: BrowserModelAsset;
 }
 
+type OrtRuntimeModule = typeof import('onnxruntime-web/webgpu');
+
+const ORT_RUNTIME_URL = new URL('../../vendor/ort.webgpu.bundle.min.mjs', import.meta.url);
+let ortRuntime: OrtRuntimeModule | null = null;
+let ortRuntimePromise: Promise<OrtRuntimeModule> | null = null;
 let environmentConfigured = false;
 
-function configureEnvironment(profile: HardwareProfile): void {
+async function loadOrtRuntime(): Promise<OrtRuntimeModule> {
+  if (ortRuntime !== null) return ortRuntime;
+  if (ortRuntimePromise === null) {
+    ortRuntimePromise = import(ORT_RUNTIME_URL.href) as Promise<OrtRuntimeModule>;
+  }
+  ortRuntime = await ortRuntimePromise;
+  return ortRuntime;
+}
+
+function requireOrtRuntime(): OrtRuntimeModule {
+  if (ortRuntime === null) throw new Error('ONNX Runtime Web has not been initialised.');
+  return ortRuntime;
+}
+
+function configureEnvironment(profile: HardwareProfile, runtime: OrtRuntimeModule): void {
   if (environmentConfigured) return;
   environmentConfigured = true;
 
-  ort.env.wasm.numThreads = profile.sharedMemory ? Math.max(1, profile.workerCount) : 1;
-  ort.env.wasm.simd = profile.wasmSimd;
-  ort.env.wasm.wasmPaths = new URL('../../vendor/', import.meta.url).href;
+  runtime.env.wasm.numThreads = profile.sharedMemory ? Math.max(1, profile.workerCount) : 1;
+  runtime.env.wasm.simd = profile.wasmSimd;
+  runtime.env.wasm.wasmPaths = new URL('../../vendor/', import.meta.url).href;
 }
 
 async function externalDataFor(asset: BrowserModelAsset): Promise<readonly ort.ExternalDataFileType[]> {
@@ -32,6 +51,7 @@ async function externalDataFor(asset: BrowserModelAsset): Promise<readonly ort.E
 }
 
 async function createSession(
+  runtime: OrtRuntimeModule,
   bytes: Uint8Array,
   asset: BrowserModelAsset,
   provider: ModelExecutionProvider,
@@ -43,20 +63,21 @@ async function createSession(
     executionMode: 'sequential',
     ...(externalData.length > 0 ? { externalData } : {}),
   };
-  return ort.InferenceSession.create(bytes, options);
+  return runtime.InferenceSession.create(bytes, options);
 }
 
 export async function loadOrtModel(
   asset: BrowserModelAsset,
   profile: HardwareProfile,
 ): Promise<LoadedOrtModel> {
-  configureEnvironment(profile);
+  const runtime = await loadOrtRuntime();
+  configureEnvironment(profile, runtime);
   const bytes = await loadModelBytes(asset);
 
   if (profile.webgpu.available) {
     try {
       return {
-        session: await createSession(bytes, asset, 'webgpu'),
+        session: await createSession(runtime, bytes, asset, 'webgpu'),
         provider: 'webgpu',
         asset,
       };
@@ -66,18 +87,18 @@ export async function loadOrtModel(
   }
 
   return {
-    session: await createSession(bytes, asset, 'wasm'),
+    session: await createSession(runtime, bytes, asset, 'wasm'),
     provider: 'wasm',
     asset,
   };
 }
 
 export function floatTensor(data: Float32Array, dimensions: readonly number[]): ort.Tensor {
-  return new ort.Tensor('float32', data, [...dimensions]);
+  return new (requireOrtRuntime().Tensor)('float32', data, [...dimensions]);
 }
 
 export function int64Tensor(data: BigInt64Array, dimensions: readonly number[]): ort.Tensor {
-  return new ort.Tensor('int64', data, [...dimensions]);
+  return new (requireOrtRuntime().Tensor)('int64', data, [...dimensions]);
 }
 
 export function tensorFloatData(tensor: ort.Tensor): Float32Array {
