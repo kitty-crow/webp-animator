@@ -14,8 +14,10 @@ import argparse
 import hashlib
 import inspect
 import json
+import math
 import os
 import sys
+from fractions import Fraction
 from pathlib import Path
 
 
@@ -41,6 +43,12 @@ def sha256(path: Path) -> str:
 
 def next_multiple(value: int, divisor: int) -> int:
     return ((value + divisor - 1) // divisor) * divisor
+
+
+def scale_input_divisor(scale_factor: float) -> int:
+    """Return an input multiple whose scaled size remains divisible by 16."""
+    scale = Fraction(str(scale_factor)).limit_denominator(64)
+    return scale.denominator * 16 // math.gcd(scale.numerator, 16)
 
 
 def export_graph(torch, module, inputs, path: Path, opset: int) -> None:
@@ -141,7 +149,7 @@ def main() -> None:
     scale_manifest = []
     asset_files: list[Path] = []
     for component, scale_factor in variants:
-        divisor = max(16, int(round(16 / max(scale_factor, 0.125))))
+        divisor = scale_input_divisor(scale_factor)
         height = next_multiple(args.height, divisor)
         width = next_multiple(args.width, divisor)
         first = torch.zeros(1, 3, height, width, dtype=torch.float32)
