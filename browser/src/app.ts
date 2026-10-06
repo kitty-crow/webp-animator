@@ -679,6 +679,7 @@ cancelButton.addEventListener('click', () => {
 });
 
 document.addEventListener('visibilitychange', () => {
+  inferenceWorker.setPageHidden(document.hidden);
   if (activeInferenceJobId !== null) {
     if (document.hidden) setStatus('Tab hidden. The persistent render worker is continuing the active job.');
     else setStatus('Tab visible again. Persistent render worker remains active.');
