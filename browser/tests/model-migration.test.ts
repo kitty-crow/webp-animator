@@ -7,6 +7,16 @@ import { DEFAULT_MOG_SCHEDULE, makeMogDdimSchedule, mogDdimStep, mogDynamicScale
 import { dilatePlane } from '../src/inference/propainter-mask.js';
 import { initialiseResShiftSample, makeResShiftSchedule, resShiftReverseStep } from '../src/inference/resshift-scheduler.js';
 
+describe('browser ONNX runtime loading', () => {
+  test('uses a worker-safe deployed module URL instead of a document import map', async () => {
+    const runtimeSource = await Bun.file(new URL('../src/inference/ort-runtime.ts', import.meta.url)).text();
+    const pageSource = await Bun.file(new URL('../index.html', import.meta.url)).text();
+    expect(runtimeSource).toContain("new URL('../../vendor/ort.webgpu.bundle.min.mjs', import.meta.url)");
+    expect(runtimeSource).not.toContain("import * as ort from 'onnxruntime-web/webgpu'");
+    expect(pageSource).not.toContain('type="importmap"');
+  });
+});
+
 describe('browser model catalogue', () => {
   test('model families are unique and use automatic WebGPU to WASM fallback', () => {
     const families = BROWSER_MODEL_CATALOG.map((definition) => definition.family);
