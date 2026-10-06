@@ -4,6 +4,7 @@ import { gpuLabel } from './hardware.js';
 import { InferenceWorkerClient, type RenderWorkerProgress } from './inference-worker-client.js';
 import type { FrameGeneratorEngine, RenderInterpolationEngine, TemporalRepairEngine } from './inference-worker-protocol.js';
 import { interpolateAmtFrames } from './inference/amt-interpolation.js';
+import { browserHostedManifestUrl } from './inference/catalog.js';
 import { generateMidpointAnchors } from './inference/frame-generator.js';
 import { interpolateGenerativeFrames, type GenerativeInterpolationEngine } from './inference/generative-interpolation.js';
 import { repairProPainterFrames } from './inference/propainter.js';
@@ -140,12 +141,14 @@ function repairManifestStorageKey(repair: ManifestRepairEngine): string {
 
 function syncManifestField(): void {
   const engine = interpolationEngine();
-  manifestField.hidden = !requiresManifest(engine);
   if (!requiresManifest(engine)) {
+    manifestField.hidden = true;
     manifestInput.value = '';
     return;
   }
-  manifestInput.value = localStorage.getItem(manifestStorageKey(engine)) ?? '';
+  const hosted = browserHostedManifestUrl(engine);
+  manifestField.hidden = hosted !== null;
+  manifestInput.value = hosted ?? localStorage.getItem(manifestStorageKey(engine)) ?? '';
 }
 
 function syncGeneratorManifestField(): void {
@@ -170,6 +173,8 @@ function syncRepairManifestField(): void {
 
 function selectedManifestUrl(engine: RenderInterpolationEngine): string | null {
   if (!requiresManifest(engine)) return null;
+  const hosted = browserHostedManifestUrl(engine);
+  if (hosted !== null) return hosted;
   const value = manifestInput.value.trim();
   if (!value) throw new Error(`${engineLabel(engine)} requires the manifest.json produced by its browser exporter.`);
   return value;
