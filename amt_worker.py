@@ -27,9 +27,7 @@ from worker_common import (
 AMT_SCALES = (1.0, 0.75, 0.5, 0.25)
 TILE_CORES = (256, 192, 128, 96)
 TILE_CONTEXT = 64
-LOW_VRAM_BYTES = int(os.environ.get("AMT_LOW_VRAM_BYTES", str(6 * 1024**3)))
-FORCE_TILED_PIXELS = int(os.environ.get("AMT_FORCE_TILED_PIXELS", str(640 * 640)))
-WORKER_REVISION = "amt-low-vram-v3"
+WORKER_REVISION = "amt-quality-first-v4"
 
 
 def parse_args():
@@ -248,32 +246,11 @@ def _interpolate_tiled(
     raise RuntimeError(last_message or "AMT tiled CUDA inference exhausted all tile sizes")
 
 
-def _cuda_memory(torch, device) -> tuple[int | None, int | None]:
-    if device.type != "cuda":
-        return None, None
-    try:
-        free, total = torch.cuda.mem_get_info(device)
-        return int(free), int(total)
-    except Exception:
-        try:
-            props = torch.cuda.get_device_properties(device)
-            return None, int(props.total_memory)
-        except Exception:
-            return None, None
-
-
-def _prefer_tiled(torch, device, size: tuple[int, int]) -> bool:
-    if device.type != "cuda":
-        return False
-    if os.environ.get("AMT_FORCE_TILED", "").strip().lower() in {"1", "true", "yes", "on"}:
-        return True
-    free, total = _cuda_memory(torch, device)
-    pixels = int(size[0]) * int(size[1])
-    if total is not None and total <= LOW_VRAM_BYTES:
-        return True
-    if free is not None and free < min(LOW_VRAM_BYTES // 2, 3 * 1024**3):
-        return True
-    return pixels >= FORCE_TILED_PIXELS
+def _prefer_tiled(_torch, device, _size: tuple[int, int]) -> bool:
+    """Tiling is opt-in; otherwise full-frame inference is attempted first."""
+    return device.type == "cuda" and os.environ.get(
+        "AMT_FORCE_TILED", ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def make_interpolator(torch, device, model):

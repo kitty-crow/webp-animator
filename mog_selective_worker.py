@@ -32,15 +32,9 @@ def _normalise_target(target):
     return aligned
 
 
-def _target_ladder(total_vram):
-    gb = total_vram / 1024**3
-    if gb <= 4.5:
-        return [(256, 128), (192, 128), (128, 128)]
-    if gb <= 8.0:
-        return [(320, 192), (256, 128), (192, 128), (128, 128)]
-    if gb <= 12.0:
-        return [(448, 256), (384, 256), (320, 192), (256, 128)]
-    return [(512, 320), (448, 256), (384, 256), (320, 192), (256, 128), (192, 128)]
+def _target_ladder(_total_vram):
+    """Try model-supported quality in descending order; only OOM advances the ladder."""
+    return [(512, 320), (448, 256), (384, 256), (320, 192), (256, 128), (192, 128), (128, 128)]
 
 
 implementation._target_ladder = _target_ladder

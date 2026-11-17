@@ -74,14 +74,9 @@ def _prep_heartbeat(stop: threading.Event):
         _PROGRESS.set(value)
 
 
-def _target_ladder(total_vram: int) -> list[tuple[int, int]]:
-    gb = total_vram / 1024**3
-    if gb <= 4.5:
-        # Avoid wasting time on resolutions that are implausible on a 4 GB card.
-        return [(256, 160), (224, 128)]
-    if gb <= 8.0:
-        return [(384, 224), (320, 192), (256, 160), (224, 128)]
-    return list(TARGETS)
+def _target_ladder(_total_vram):
+    """Try model-supported quality in descending order; only OOM advances the ladder."""
+    return [(512, 320), (448, 256), (384, 256), (320, 192), (256, 128), (192, 128), (128, 128)]
 
 
 def _install_sampler_progress(inference_module):
@@ -502,10 +497,8 @@ def main():
                     release_cuda(torch)
             else:
                 raise RuntimeError(
-                    "MoG exhausted all low-VRAM resolutions. Its released checkpoint is "
-                    "large enough that a 4 GB GTX 1050 Ti can be below the model's minimum "
-                    "practical VRAM even in FP16. The same worker automatically starts at "
-                    "higher quality on an 11 GB RTX 2080 Ti."
+                    "MoG ran out of CUDA memory at every supported resolution. "
+                    "Free GPU memory or select a different offload mode or engine."
                 ) from last_error
 
         count = max(0, int(task.get("count", 0)))

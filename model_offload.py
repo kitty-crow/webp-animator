@@ -103,9 +103,9 @@ def choose_offload_mode(model, device, *, env_var: str) -> tuple[str, dict[str, 
         free_gpu = total_gpu
     ram_bytes = available_ram_bytes()
 
-    gpu_margin = max(768 * 1024**2, int(weight_bytes * 0.25))
+    gpu_margin = int(weight_bytes * 0.25)
     gpu_resident_ok = weight_bytes + gpu_margin <= free_gpu
-    ram_margin = max(2 * _GIB, int(weight_bytes * 0.35))
+    ram_margin = int(weight_bytes * 0.35)
     cpu_offload_ok = ram_bytes <= 0 or weight_bytes + ram_margin <= ram_bytes
 
     if requested == "auto":

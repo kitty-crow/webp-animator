@@ -224,3 +224,7 @@ MOG_BOOTSTRAP_PYTHON
 MOG_TORCH_INDEX
 MOG_DDIM_STEPS
 ```
+
+## Native inference quality policy
+
+AMT attempts full-frame inference before reducing scale or using contextual tiles. Set `AMT_FORCE_TILED=1` only to request tiling explicitly. MoG and ToonCrafter begin at the highest supported aligned model resolution regardless of reported device capacity and retry smaller targets only after CUDA OOM. These targets reflect model geometry, not GPU memory tiers. Model residency uses measured free memory and model weight size; it does not depend on a particular GPU model or a fixed VRAM allowance. Existing CUDA device task distribution remains unchanged. Peer-backed model placement is not implemented by this change.
