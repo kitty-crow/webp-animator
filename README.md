@@ -160,7 +160,11 @@ The released MoG checkpoints are very large. A 4 GB GPU can still be below the m
 
 ### Multi-GPU execution
 
-Generative interpolation gaps are independent jobs. When more than one CUDA GPU is visible, WebP Animator shards gaps across GPUs and runs one model worker per GPU in parallel. This avoids pretending separate VRAM pools are one device and scales naturally on equal-card systems.
+Generative interpolation gaps are independent jobs. WebP Animator assigns separate CUDA devices to independent workers first. When a MoG or ToonCrafter worker has spare visible devices, it may use a mutually accessible peer GPU as a weight store if its execution GPU cannot hold the model with headroom. The existing RAM and disk offload paths remain available when peer storage is unavailable. CUDA selects the actual peer transport; this is not a single contiguous VRAM pool or tensor-parallel execution.
+
+AMT attempts full-frame inference on GPUs with sufficient available memory, retaining contextual tiling and reduced-scale retries. Set `AMT_FORCE_TILED_PIXELS` to a positive pixel count to restore an explicit tiling threshold. MoG and ToonCrafter retain conservative starting resolutions on smaller GPUs and try the highest existing aligned target on larger GPUs before OOM retries.
+
+`MOG_OFFLOAD` and `TOONCRAFTER_OFFLOAD` accept `auto`, `gpu`, `peer`, `cpu` or `disk`. Set `WEBP_PEER_OFFLOAD=0` to disable peer allocation and preserve independent device scheduling. Peer selection honours CUDA visibility and available memory; no particular GPU model is required.
 
 To restrict or select devices, use the normal CUDA mask:
 

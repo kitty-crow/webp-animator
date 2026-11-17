@@ -50,11 +50,11 @@ def install(generative_vfi) -> None:
 
         gpu_tokens = generative_vfi._visible_gpu_tokens()
         requested = int(os.environ.get("GENERATIVE_VFI_GPU_WORKERS", "0") or 0)
-        if requested > 0:
-            gpu_tokens = gpu_tokens[:requested]
-        if not gpu_tokens:
-            gpu_tokens = [None]
-        worker_count = max(1, min(len(tasks), len(gpu_tokens)))
+        from gpu_resources import PEER_ENGINES, worker_device_groups
+        gpu_tokens = worker_device_groups(
+            gpu_tokens, len(tasks), requested, allow_peer=engine in PEER_ENGINES,
+        )
+        worker_count = len(gpu_tokens)
 
         shards: list[list[dict]] = [[] for _ in range(worker_count)]
         for index, task in enumerate(tasks):

@@ -133,7 +133,9 @@ def _append_ui_patch() -> None:
 
 def _visible_gpu_tokens() -> list[str]:
     explicit = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
-    if explicit and explicit not in {"-1", "none", "None"}:
+    if explicit.lower() in {"-1", "none"}:
+        return []
+    if explicit:
         tokens = [item.strip() for item in explicit.split(",") if item.strip()]
         if tokens:
             return tokens
@@ -256,12 +258,11 @@ def run_generative_interpolator(
 
     gpu_tokens = _visible_gpu_tokens()
     requested = int(os.environ.get("GENERATIVE_VFI_GPU_WORKERS", "0") or 0)
-    if requested > 0:
-        gpu_tokens = gpu_tokens[:requested]
-    if not gpu_tokens:
-        gpu_tokens = [None]
-    worker_count = min(len(tasks), len(gpu_tokens))
-    worker_count = max(1, worker_count)
+    from gpu_resources import PEER_ENGINES, worker_device_groups
+    gpu_tokens = worker_device_groups(
+        gpu_tokens, len(tasks), requested, allow_peer=engine in PEER_ENGINES,
+    )
+    worker_count = len(gpu_tokens)
 
     shards: list[list[dict]] = [[] for _ in range(worker_count)]
     for index, task in enumerate(tasks):

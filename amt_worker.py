@@ -28,7 +28,7 @@ AMT_SCALES = (1.0, 0.75, 0.5, 0.25)
 TILE_CORES = (256, 192, 128, 96)
 TILE_CONTEXT = 64
 LOW_VRAM_BYTES = int(os.environ.get("AMT_LOW_VRAM_BYTES", str(6 * 1024**3)))
-FORCE_TILED_PIXELS = int(os.environ.get("AMT_FORCE_TILED_PIXELS", str(640 * 640)))
+FORCE_TILED_PIXELS = int(os.environ.get("AMT_FORCE_TILED_PIXELS", "0"))
 WORKER_REVISION = "amt-low-vram-v3"
 
 
@@ -273,7 +273,7 @@ def _prefer_tiled(torch, device, size: tuple[int, int]) -> bool:
         return True
     if free is not None and free < min(LOW_VRAM_BYTES // 2, 3 * 1024**3):
         return True
-    return pixels >= FORCE_TILED_PIXELS
+    return FORCE_TILED_PIXELS > 0 and pixels >= FORCE_TILED_PIXELS
 
 
 def make_interpolator(torch, device, model):

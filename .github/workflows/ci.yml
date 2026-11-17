@@ -33,6 +33,7 @@ jobs:
             temporal_repair.py propainter_repair_worker.py timeline_pipeline.py analysis_upload_reuse.py \
             setup_rife.py setup_engine_common.py setup_acceleration.py setup_amt.py setup_eden.py setup_speed.py setup_propainter.py \
             setup_resshift.py setup_mog.py setup_tooncrafter.py
+          python -m py_compile gpu_resources.py model_offload.py generative_process_control.py tooncrafter_selective_worker_entry.py test_gpu_resources.py
           node --check advanced_ui.js
           node --check live_run_ui.js
           node --check workspace_ui/workspace.js
@@ -66,6 +67,7 @@ jobs:
           test_geometry_cache.py
           test_analysis_upload_reuse.py
           test_generative_vfi.py
+          test_gpu_resources.py
 
       - name: Ensure retired OpenAI systems stay absent
         shell: bash
