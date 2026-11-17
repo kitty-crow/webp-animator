@@ -125,7 +125,7 @@ def _move_core_offloaded(model, device):
     # RAM/disk hooks already load each layer onto CUDA only for the forward that
     # needs it, then evict it again. A later request to move the core to CPU before
     # VAE decode therefore requires no full-model transfer.
-    if current_mode in {"cpu", "disk"}:
+    if current_mode in {"cpu", "disk", "peer"}:
         return model
 
     if target.type != "cuda":

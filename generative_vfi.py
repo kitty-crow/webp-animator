@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable
 
 from engine_paths import acceleration_status, mog_paths, resshift_paths
+from native_gpu import configured_worker_masks
 
 ROOT = Path(__file__).resolve().parent
 MARKERS = {
@@ -254,14 +255,8 @@ def run_generative_interpolator(
     worker_dir = stage_dir / f"{engine}-interpolator-v2"
     worker_dir.mkdir(parents=True, exist_ok=True)
 
-    gpu_tokens = _visible_gpu_tokens()
-    requested = int(os.environ.get("GENERATIVE_VFI_GPU_WORKERS", "0") or 0)
-    if requested > 0:
-        gpu_tokens = gpu_tokens[:requested]
-    if not gpu_tokens:
-        gpu_tokens = [None]
-    worker_count = min(len(tasks), len(gpu_tokens))
-    worker_count = max(1, worker_count)
+    gpu_tokens = configured_worker_masks(engine, _visible_gpu_tokens(), len(tasks))
+    worker_count = len(gpu_tokens)
 
     shards: list[list[dict]] = [[] for _ in range(worker_count)]
     for index, task in enumerate(tasks):
