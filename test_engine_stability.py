@@ -4,6 +4,7 @@ import os
 import unittest
 from unittest import mock
 
+import amt_worker
 import engine_catalog
 import generative_pipeline_bridge
 import generative_vfi
@@ -171,12 +172,20 @@ class EngineStabilityTests(unittest.TestCase):
         self.assertIs(model.eval(), model)
         self.assertFalse(model.training)
 
-    def test_diffusion_low_vram_targets_are_unet_aligned(self):
+    def test_amt_tiling_is_explicit_not_capacity_based(self):
+        device = mock.Mock(type="cuda")
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(amt_worker._prefer_tiled(mock.Mock(), device, (8192, 8192)))
+        with mock.patch.dict(os.environ, {"AMT_FORCE_TILED": "1"}):
+            self.assertTrue(amt_worker._prefer_tiled(mock.Mock(), device, (32, 32)))
+
+    def test_diffusion_quality_starts_at_highest_supported_target(self):
         gib = 1024**3
         for worker in (mog_selective_worker, tooncrafter_selective_worker_entry):
             for vram in (4 * gib, 6 * gib, 11 * gib, 16 * gib):
                 ladder = worker._target_ladder(vram)
-                self.assertTrue(ladder)
+                self.assertEqual(ladder, worker._target_ladder(0))
+                self.assertEqual(ladder[0], (512, 320))
                 for width, height in ladder:
                     self.assertEqual(width % worker.SPATIAL_ALIGNMENT, 0)
                     self.assertEqual(height % worker.SPATIAL_ALIGNMENT, 0)

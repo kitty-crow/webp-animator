@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import job_control
+from native_gpu import configured_worker_masks
 
 
 _installed = False
@@ -48,13 +49,8 @@ def install(generative_vfi) -> None:
         worker_dir = Path(stage_dir) / f"{engine}-interpolator-v2"
         worker_dir.mkdir(parents=True, exist_ok=True)
 
-        gpu_tokens = generative_vfi._visible_gpu_tokens()
-        requested = int(os.environ.get("GENERATIVE_VFI_GPU_WORKERS", "0") or 0)
-        if requested > 0:
-            gpu_tokens = gpu_tokens[:requested]
-        if not gpu_tokens:
-            gpu_tokens = [None]
-        worker_count = max(1, min(len(tasks), len(gpu_tokens)))
+        gpu_tokens = configured_worker_masks(engine, generative_vfi._visible_gpu_tokens(), len(tasks))
+        worker_count = len(gpu_tokens)
 
         shards: list[list[dict]] = [[] for _ in range(worker_count)]
         for index, task in enumerate(tasks):

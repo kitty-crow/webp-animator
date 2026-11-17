@@ -66,6 +66,8 @@ jobs:
           test_geometry_cache.py
           test_analysis_upload_reuse.py
           test_generative_vfi.py
+          test_engine_stability.py
+          test_native_gpu.py
 
       - name: Ensure retired OpenAI systems stay absent
         shell: bash

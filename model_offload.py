@@ -10,6 +10,9 @@ import types
 from pathlib import Path
 from typing import Any
 
+from native_gpu import peer_weight_state
+from worker_common import is_cuda_oom
+
 _GIB = 1024 ** 3
 
 # These research models sometimes call methods on wrapper modules and then access
@@ -103,9 +106,9 @@ def choose_offload_mode(model, device, *, env_var: str) -> tuple[str, dict[str, 
         free_gpu = total_gpu
     ram_bytes = available_ram_bytes()
 
-    gpu_margin = max(768 * 1024**2, int(weight_bytes * 0.25))
+    gpu_margin = int(weight_bytes * 0.25)
     gpu_resident_ok = weight_bytes + gpu_margin <= free_gpu
-    ram_margin = max(2 * _GIB, int(weight_bytes * 0.35))
+    ram_margin = int(weight_bytes * 0.35)
     cpu_offload_ok = ram_bytes <= 0 or weight_bytes + ram_margin <= ram_bytes
 
     if requested == "auto":
@@ -269,6 +272,21 @@ def apply_model_offload(
     free_gpu_gb = stats["gpu_free"] / _GIB
     ram_gb = stats["ram_available"] / _GIB if stats["ram_available"] else 0.0
 
+    peer_state = None
+    if mode != "gpu" and stats["requested"] == "auto":
+        import torch
+
+        # The model is not modified until hooks are attached. A failed staging
+        # attempt can therefore safely fall back to the existing host path.
+        try:
+            peer_state, peer_bytes = peer_weight_state(torch, model, torch.device(device), is_cuda_oom)
+        except RuntimeError as exc:
+            print(f"{namespace.upper()}_OFFLOAD peer staging unavailable: {exc}", flush=True)
+        if peer_state is not None:
+            mode = "peer"
+            stats["peer_weight_bytes"] = peer_bytes
+            print(f"{namespace.upper()}_OFFLOAD peer weights={peer_bytes / _GIB:.2f}GB", flush=True)
+
     if mode == "gpu":
         model = model.to(device)
         buffer_bytes = 0
@@ -276,7 +294,15 @@ def apply_model_offload(
     else:
         cpu_offload, _disk = _ensure_accelerate()
 
-        if mode == "cpu":
+        if mode == "peer":
+            model = cpu_offload(
+                model,
+                execution_device=device,
+                offload_buffers=False,
+                state_dict=peer_state,
+                preload_module_classes=_PRELOAD_MODULE_CLASSES,
+            )
+        elif mode == "cpu":
             try:
                 model = cpu_offload(
                     model,

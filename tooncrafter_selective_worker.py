@@ -62,15 +62,9 @@ def _prep_heartbeat(stop: threading.Event):
         _PROGRESS.set(value)
 
 
-def _target_ladder(total_vram: int) -> list[tuple[int, int]]:
-    gb = total_vram / 1024**3
-    if gb <= 4.5:
-        return [(256, 160), (224, 128)]
-    if gb <= 8.0:
-        return [(320, 192), (256, 160), (224, 128)]
-    if gb <= 12.0:
-        return [(448, 256), (384, 224), (320, 192), (256, 160)]
-    return list(TARGETS)
+def _target_ladder(_total_vram):
+    """Try model-supported quality in descending order; only OOM advances the ladder."""
+    return [(512, 320), (448, 256), (384, 256), (320, 192), (256, 128), (192, 128), (128, 128)]
 
 
 def _load_checkpoint_mmap(torch, model, checkpoint: Path):
@@ -457,10 +451,8 @@ def main():
                     release_cuda(torch)
             else:
                 raise RuntimeError(
-                    "ToonCrafter exhausted all low-VRAM fallbacks. Its diffusion core is "
-                    "large enough that a 4 GB GTX 1050 Ti is likely below the practical "
-                    "minimum even when the frame resolution is reduced. The same worker "
-                    "uses FP16 component offload and larger quality rungs on 11 GB cards."
+                    "ToonCrafter ran out of CUDA memory at every supported resolution. "
+                    "Free GPU memory or select a different offload mode or engine."
                 ) from last_error
 
         count = max(0, int(task.get("count", 0)))
