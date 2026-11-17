@@ -10,6 +10,8 @@ import types
 from pathlib import Path
 from typing import Any
 
+from gpu_resources import choose_peer
+
 _GIB = 1024 ** 3
 
 # These research models sometimes call methods on wrapper modules and then access
@@ -83,9 +85,9 @@ def _normalise_mode(value: object) -> str:
         "resident": "gpu", "cuda": "gpu",
     }
     mode = aliases.get(mode, mode)
-    if mode not in {"auto", "gpu", "cpu", "disk"}:
+    if mode not in {"auto", "gpu", "peer", "cpu", "disk"}:
         raise RuntimeError(
-            f"Unknown model offload mode {mode!r}; choose auto, gpu, cpu/ram, or disk."
+            f"Unknown model offload mode {mode!r}; choose auto, gpu, peer, cpu/ram, or disk."
         )
     return mode
 
@@ -108,8 +110,14 @@ def choose_offload_mode(model, device, *, env_var: str) -> tuple[str, dict[str, 
     ram_margin = max(2 * _GIB, int(weight_bytes * 0.35))
     cpu_offload_ok = ram_bytes <= 0 or weight_bytes + ram_margin <= ram_bytes
 
+    peer_index = None
+    if requested == "peer" or (requested == "auto" and not gpu_resident_ok):
+        peer_index = choose_peer(torch, device, weight_bytes)
     if requested == "auto":
-        mode = "gpu" if gpu_resident_ok else ("cpu" if cpu_offload_ok else "disk")
+        mode = ("gpu" if gpu_resident_ok else "peer" if peer_index is not None
+                else "cpu" if cpu_offload_ok else "disk")
+    elif requested == "peer" and peer_index is None:
+        raise RuntimeError("No accessible peer GPU has enough free memory for model weights")
     else:
         mode = requested
 
@@ -121,6 +129,7 @@ def choose_offload_mode(model, device, *, env_var: str) -> tuple[str, dict[str, 
         "gpu_resident_ok": gpu_resident_ok,
         "cpu_offload_ok": cpu_offload_ok,
         "requested": requested,
+        "peer_index": peer_index,
     }
 
 
@@ -254,6 +263,25 @@ def _disk_offload(model, device, *, source: Path, checkpoint: Path, namespace: s
     return model
 
 
+def _peer_weights(model, peer_index):
+    """Copy backing weights before attaching hooks; leave the model untouched."""
+    import torch
+    from worker_common import is_cuda_oom
+
+    weights = {}
+    try:
+        peer = torch.device("cuda", peer_index)
+        for name, value in model.state_dict().items():
+            weights[name] = value.detach().to(peer)
+        return weights
+    except RuntimeError as exc:
+        if not is_cuda_oom(torch, exc):
+            raise
+        weights.clear()
+        gc.collect()
+        return None
+
+
 def apply_model_offload(
     model,
     device,
@@ -269,6 +297,15 @@ def apply_model_offload(
     free_gpu_gb = stats["gpu_free"] / _GIB
     ram_gb = stats["ram_available"] / _GIB if stats["ram_available"] else 0.0
 
+    peer_weights = None
+    if mode == "peer":
+        peer_weights = _peer_weights(model, stats["peer_index"])
+        if peer_weights is None:
+            if stats["requested"] != "auto":
+                raise RuntimeError("Peer GPU allocation failed")
+            mode = "cpu" if stats["cpu_offload_ok"] else "disk"
+            print(f"{namespace.upper()}_OFFLOAD peer allocation failed; using {mode}", flush=True)
+
     if mode == "gpu":
         model = model.to(device)
         buffer_bytes = 0
@@ -276,7 +313,18 @@ def apply_model_offload(
     else:
         cpu_offload, _disk = _ensure_accelerate()
 
-        if mode == "cpu":
+        if mode == "peer":
+            # Accelerate 0.25 accepts a caller-supplied backing state dictionary.
+            # Keep that dictionary on the peer and stream layers to the execution
+            # GPU; the existing meta guards and buffer staging remain in place.
+            model = cpu_offload(
+                model,
+                execution_device=device,
+                state_dict=peer_weights,
+                offload_buffers=False,
+                preload_module_classes=_PRELOAD_MODULE_CLASSES,
+            )
+        elif mode == "cpu":
             try:
                 model = cpu_offload(
                     model,
@@ -312,6 +360,7 @@ def apply_model_offload(
     print(
         f"{namespace.upper()}_OFFLOAD mode={mode} weights={weight_gb:.2f}GB "
         f"gpu={gpu_gb:.2f}GB free={free_gpu_gb:.2f}GB "
+        f"peer={stats['peer_index'] if mode == 'peer' else None} "
         f"ram_available={ram_gb:.2f}GB cuda_buffers={buffer_bytes / 1024**2:.1f}MB "
         f"meta_move_guards={guarded_modules}",
         flush=True,

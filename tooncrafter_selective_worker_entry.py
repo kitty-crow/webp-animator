@@ -5,6 +5,7 @@ import gc
 
 import tooncrafter_selective_worker as implementation
 from model_offload import apply_model_offload
+from gpu_resources import diffusion_target_ladder
 
 
 SPATIAL_ALIGNMENT = 64
@@ -33,14 +34,7 @@ def _normalise_target(target):
 
 
 def _target_ladder(total_vram):
-    gb = total_vram / 1024**3
-    if gb <= 4.5:
-        return [(256, 128), (192, 128), (128, 128)]
-    if gb <= 8.0:
-        return [(320, 192), (256, 128), (192, 128), (128, 128)]
-    if gb <= 12.0:
-        return [(448, 256), (384, 256), (320, 192), (256, 128)]
-    return [(512, 320), (448, 256), (384, 256), (320, 192), (256, 128), (192, 128)]
+    return diffusion_target_ladder(total_vram)
 
 
 implementation._target_ladder = _target_ladder
@@ -131,7 +125,7 @@ def _move_core_offloaded(model, device):
     # RAM/disk hooks already load each layer onto CUDA only for the forward that
     # needs it, then evict it again. A later request to move the core to CPU before
     # VAE decode therefore requires no full-model transfer.
-    if current_mode in {"cpu", "disk"}:
+    if current_mode in {"peer", "cpu", "disk"}:
         return model
 
     if target.type != "cuda":

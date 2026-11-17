@@ -6,6 +6,7 @@ import shutil
 
 import mog_selective_worker_v2 as implementation
 from model_offload import apply_model_offload
+from gpu_resources import diffusion_target_ladder
 
 
 SPATIAL_ALIGNMENT = 64
@@ -33,14 +34,7 @@ def _normalise_target(target):
 
 
 def _target_ladder(total_vram):
-    gb = total_vram / 1024**3
-    if gb <= 4.5:
-        return [(256, 128), (192, 128), (128, 128)]
-    if gb <= 8.0:
-        return [(320, 192), (256, 128), (192, 128), (128, 128)]
-    if gb <= 12.0:
-        return [(448, 256), (384, 256), (320, 192), (256, 128)]
-    return [(512, 320), (448, 256), (384, 256), (320, 192), (256, 128), (192, 128)]
+    return diffusion_target_ladder(total_vram)
 
 
 implementation._target_ladder = _target_ladder
